@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "keys": [
+    {
+      "id": "K001",
+      "key": "MUCLK-REPLACE_WITH_REAL_KEY",
+      "exp": "2026-12-31",
+      "note": "example-customer",
+      "max_devices": 1,
+      "enabled": true,
+      "hwids": []
+    }
+  ]
+}

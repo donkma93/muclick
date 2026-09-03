@@ -1,0 +1,26 @@
+# Secrets / tokens — KHÔNG commit
+muclick_secrets.py
+
+# Build
+build/
+dist/
+*.spec
+__pycache__/
+*.pyc
+*.pyo
+
+# Local runtime / user data (canonical ở %APPDATA%\MuClick)
+accounts.json
+click_coords.json
+click_coords.json.legacy.bak
+autoclick_points.json
+debug_input/
+
+*.egg-info/
+.venv/
+venv/
+
+# Temp / IDE
+.idea/
+.vscode/
+*.log
