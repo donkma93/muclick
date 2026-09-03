@@ -24,6 +24,15 @@
           "app_version": "1.0.0"
         }
       ]
+    },
+    {
+      "id": "K003",
+      "key": "MUCLK-KtzmjeL4X2sVJma8ZziFcNyG9NIkG_mQ",
+      "exp": "2026-10-03",
+      "note": "",
+      "max_devices": 1,
+      "enabled": true,
+      "hwids": []
     }
   ]
 }
