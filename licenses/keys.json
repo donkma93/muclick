@@ -9,6 +9,15 @@
       "max_devices": 1,
       "enabled": true,
       "hwids": []
+    },
+    {
+      "id": "K002",
+      "key": "MUCLK-jzaUkD-RFcMN6dLC6bUFV-0MiqaP2FMK",
+      "exp": "2026-10-03",
+      "note": "",
+      "max_devices": 1,
+      "enabled": true,
+      "hwids": []
     }
   ]
 }
