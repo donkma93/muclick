@@ -1,4 +1,14 @@
 {
   "version": 1,
-  "keys": []
+  "keys": [
+    {
+      "id": "K001",
+      "key": "MUCLK-OdXG6RzgdaHmkyixU-mzbjRdoL7r5h_Z",
+      "exp": "2026-10-03",
+      "note": "admin-smoke-test",
+      "max_devices": 1,
+      "enabled": true,
+      "hwids": []
+    }
+  ]
 }
