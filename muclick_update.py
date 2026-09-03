@@ -173,32 +173,80 @@ def target_exe_path():
 
 def write_and_run_replace_script(new_exe: str, dest_exe: str | None = None):
     """
-    Tạo .bat: đợi process thoát → copy đè → start lại → xóa bat.
-    Trả về path bat đã spawn.
+    Tạo .bat: đợi process thoát → đổi tên bản cũ → copy file mới →
+    Unblock-File → kiểm tra size → start lại.
+
+    Dùng rename + copy thay vì copy đè trực tiếp để tránh file bị khóa /
+    AV quét giữa chừng gây lỗi khởi động 0xc0000142.
     """
     dest_exe = dest_exe or target_exe_path()
     new_exe = os.path.abspath(new_exe)
     dest_exe = os.path.abspath(dest_exe)
-    dest_dir = os.path.dirname(dest_exe)
+    dest_dir = os.path.dirname(dest_exe) or "."
+    old_bak = dest_exe + ".old"
+    expected_size = os.path.getsize(new_exe)
     bat_path = os.path.join(tempfile.gettempdir(), "muclick_apply_update.bat")
+    log_path = os.path.join(tempfile.gettempdir(), "muclick_update.log")
 
-    # escape cho cmd
     def q(p):
         return '"' + p.replace('"', "") + '"'
 
     lines = [
         "@echo off",
-        "setlocal",
-        "timeout /t 2 /nobreak >nul",
-        f":retry",
-        f"copy /Y {q(new_exe)} {q(dest_exe)} >nul 2>&1",
-        "if errorlevel 1 (",
-        "  timeout /t 1 /nobreak >nul",
-        "  goto retry",
+        "setlocal EnableExtensions",
+        f"echo MuClick update start > {q(log_path)}",
+        f"echo new={q(new_exe)} >> {q(log_path)}",
+        f"echo dest={q(dest_exe)} >> {q(log_path)}",
+        "rem Cho process cũ thoát hẳn + AV nhả file",
+        "timeout /t 3 /nobreak >nul",
+        f"del /F /Q {q(old_bak)} >nul 2>&1",
+        "set /a tries=0",
+        ":retry_rename",
+        "set /a tries+=1",
+        f'if exist {q(dest_exe)} (',
+        f"  move /Y {q(dest_exe)} {q(old_bak)} >> {q(log_path)} 2>&1",
+        "  if errorlevel 1 (",
+        "    if %tries% GEQ 30 (",
+        f"      echo FAIL rename after %tries% >> {q(log_path)}",
+        "      goto fail",
+        "    )",
+        "    timeout /t 1 /nobreak >nul",
+        "    goto retry_rename",
+        "  )",
         ")",
+        "set /a tries=0",
+        ":retry_copy",
+        "set /a tries+=1",
+        f"copy /B /Y {q(new_exe)} {q(dest_exe)} >> {q(log_path)} 2>&1",
+        "if errorlevel 1 (",
+        "  if %tries% GEQ 30 (",
+        f"    echo FAIL copy after %tries% >> {q(log_path)}",
+        "    goto restore",
+        "  )",
+        "  timeout /t 1 /nobreak >nul",
+        "  goto retry_copy",
+        ")",
+        f'for %%A in ({q(dest_exe)}) do set "gotsize=%%~zA"',
+        f"if not \"%gotsize%\"==\"{expected_size}\" (",
+        f"  echo FAIL size got=%gotsize% expect={expected_size} >> {q(log_path)}",
+        "  goto restore",
+        ")",
+        "rem Gỡ Zone.Identifier (Mark of the Web) nếu có — tránh SmartScreen/0xc0000142",
+        f"powershell -NoProfile -ExecutionPolicy Bypass -Command \"try {{ Unblock-File -LiteralPath '{dest_exe.replace(chr(39), '')}' -ErrorAction SilentlyContinue }} catch {{}}\" >nul 2>&1",
+        f'del /F /Q {q(dest_exe + ":Zone.Identifier")} >nul 2>&1',
+        "timeout /t 1 /nobreak >nul",
+        f"echo OK launching >> {q(log_path)}",
         f"start \"\" {q(dest_exe)}",
         f"del /F /Q {q(new_exe)} >nul 2>&1",
+        f"del /F /Q {q(old_bak)} >nul 2>&1",
         f'del /F /Q "%~f0" >nul 2>&1',
+        "exit /b 0",
+        ":restore",
+        f'if exist {q(old_bak)} move /Y {q(old_bak)} {q(dest_exe)} >> {q(log_path)} 2>&1',
+        ":fail",
+        f"echo FAIL see {q(log_path)}",
+        f'del /F /Q "%~f0" >nul 2>&1',
+        "exit /b 1",
     ]
     with open(bat_path, "w", encoding="utf-8") as f:
         f.write("\r\n".join(lines) + "\r\n")
@@ -222,8 +270,21 @@ def apply_update_and_exit(download_url: str, progress_cb=None):
     tmp_dir = os.path.join(tempfile.gettempdir(), "MuClick_update")
     os.makedirs(tmp_dir, exist_ok=True)
     tmp_exe = os.path.join(tmp_dir, RELEASE_ASSET_NAME)
-    download_file(download_url, tmp_exe, progress_cb=progress_cb)
-    if not os.path.isfile(tmp_exe) or os.path.getsize(tmp_exe) < 1024:
+    # Tải vào file tạm rồi rename → tránh exe nửa chừng nếu bị ngắt
+    tmp_part = tmp_exe + ".part"
+    if os.path.isfile(tmp_part):
+        try:
+            os.remove(tmp_part)
+        except OSError:
+            pass
+    download_file(download_url, tmp_part, progress_cb=progress_cb)
+    if not os.path.isfile(tmp_part) or os.path.getsize(tmp_part) < 1024:
         raise UpdateCheckError("File tải về không hợp lệ.")
+    if os.path.isfile(tmp_exe):
+        try:
+            os.remove(tmp_exe)
+        except OSError:
+            pass
+    os.replace(tmp_part, tmp_exe)
     write_and_run_replace_script(tmp_exe, target_exe_path())
     sys.exit(0)
