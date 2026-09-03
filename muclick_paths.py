@@ -9,7 +9,7 @@ import sys
 
 
 APP_NAME = "MuClick"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 
 
 def is_frozen():
