@@ -64,6 +64,7 @@ MOUSEEVENTF_MOVE = 0x0001
 MOUSEEVENTF_LEFTDOWN = 0x0002
 MOUSEEVENTF_LEFTUP = 0x0004
 MOUSEEVENTF_ABSOLUTE = 0x8000
+MOUSEEVENTF_VIRTUALDESK = 0x4000
 KEYEVENTF_KEYUP = 0x0002
 KEYEVENTF_UNICODE = 0x0004
 VK_CONTROL = 0x11
@@ -88,6 +89,11 @@ WM_LBUTTONDOWN = 0x0201
 WM_LBUTTONUP = 0x0202
 MK_LBUTTON = 0x0001
 EXTENDED_VKS = {VK_HOME, VK_END, 0x25, 0x26, 0x27, 0x28, 0x2D, 0x2E}  # arrows/ins/del
+SM_XVIRTUALSCREEN = 76
+SM_YVIRTUALSCREEN = 77
+SM_CXVIRTUALSCREEN = 78
+SM_CYVIRTUALSCREEN = 79
+MONITORINFOF_PRIMARY = 0x00000001
 
 MEGAMU_PATH = r"C:\Users\donpv\AppData\Local\Programs\MEGAMU\MEGAMU.exe"
 MEGAMU_DIR = r"C:\Users\donpv\AppData\Local\Programs\MEGAMU"
@@ -168,11 +174,106 @@ class INPUT(ctypes.Structure):
     _fields_ = [("type", wintypes.DWORD), ("union", INPUT_UNION)]
 
 
+class MONITORINFOEXW(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wintypes.DWORD),
+        ("rcMonitor", wintypes.RECT),
+        ("rcWork", wintypes.RECT),
+        ("dwFlags", wintypes.DWORD),
+        ("szDevice", wintypes.WCHAR * 32),
+    ]
+
+
+EnumDisplayMonitorsProc = ctypes.WINFUNCTYPE(
+    ctypes.c_bool,
+    wintypes.HANDLE,
+    wintypes.HDC,
+    ctypes.POINTER(wintypes.RECT),
+    wintypes.LPARAM,
+)
+user32.EnumDisplayMonitors.argtypes = [
+    wintypes.HDC,
+    ctypes.POINTER(wintypes.RECT),
+    EnumDisplayMonitorsProc,
+    wintypes.LPARAM,
+]
+user32.EnumDisplayMonitors.restype = wintypes.BOOL
+user32.GetMonitorInfoW.argtypes = [wintypes.HANDLE, ctypes.POINTER(MONITORINFOEXW)]
+user32.GetMonitorInfoW.restype = wintypes.BOOL
+
+
 # ---------------------------------------------------------------------------
 # Window helpers
 # ---------------------------------------------------------------------------
 def get_screen_size():
     return user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
+
+
+def get_virtual_screen_bounds():
+    """Tọa độ desktop ảo, bao gồm cả màn hình nằm bên trái/trên màn hình chính."""
+    return (
+        user32.GetSystemMetrics(SM_XVIRTUALSCREEN),
+        user32.GetSystemMetrics(SM_YVIRTUALSCREEN),
+        user32.GetSystemMetrics(SM_CXVIRTUALSCREEN),
+        user32.GetSystemMetrics(SM_CYVIRTUALSCREEN),
+    )
+
+
+def list_display_monitors():
+    """Trả về các màn hình và work area theo đúng tọa độ Windows."""
+    monitors = []
+
+    @EnumDisplayMonitorsProc
+    def callback(hmonitor, _hdc, _rect, _lparam):
+        info = MONITORINFOEXW()
+        info.cbSize = ctypes.sizeof(info)
+        if user32.GetMonitorInfoW(hmonitor, ctypes.byref(info)):
+            mon = info.rcMonitor
+            work = info.rcWork
+            monitors.append(
+                {
+                    "device": info.szDevice,
+                    "primary": bool(info.dwFlags & MONITORINFOF_PRIMARY),
+                    "monitor": (mon.left, mon.top, mon.right, mon.bottom),
+                    "work": (work.left, work.top, work.right, work.bottom),
+                }
+            )
+        return True
+
+    user32.EnumDisplayMonitors(None, None, callback, 0)
+    # Thứ tự trực quan giúp việc phân bổ cửa sổ luôn ổn định.
+    monitors.sort(key=lambda m: (m["monitor"][1], m["monitor"][0], m["device"]))
+    return monitors
+
+
+def monitor_label(monitor):
+    left, top, right, bottom = monitor["monitor"]
+    primary = " (Chính)" if monitor["primary"] else ""
+    return (
+        f"{monitor['device']}{primary} — {right - left}x{bottom - top} "
+        f"tại ({left}, {top})"
+    )
+
+
+def enable_per_monitor_dpi_awareness():
+    """Giữ tọa độ cửa sổ/click đúng trên màn hình có DPI scale khác nhau."""
+    try:
+        # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 (Windows 10 1703+)
+        if user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
+            return
+    except (AttributeError, OSError):
+        pass
+    try:
+        shcore = ctypes.windll.shcore
+        # PROCESS_PER_MONITOR_DPI_AWARE
+        if shcore.SetProcessDpiAwareness(2) == 0:
+            return
+    except (AttributeError, OSError):
+        pass
+    try:
+        user32.SetProcessDPIAware()
+    except (AttributeError, OSError):
+        pass
 
 
 def get_window_text(hwnd):
@@ -429,14 +530,23 @@ def mouse_click_screen(x, y, settle=0.12, hwnd=None):
         time.sleep(0.05)
     user32.SetCursorPos(x, y)
     time.sleep(settle)
-    sw, sh = get_screen_size()
-    abs_x = int(x * 65535 / max(sw - 1, 1))
-    abs_y = int(y * 65535 / max(sh - 1, 1))
+    vx, vy, vw, vh = get_virtual_screen_bounds()
+    abs_x = int((x - vx) * 65535 / max(vw - 1, 1))
+    abs_y = int((y - vy) * 65535 / max(vh - 1, 1))
+    abs_x = max(0, min(65535, abs_x))
+    abs_y = max(0, min(65535, abs_y))
     extra = ctypes.pointer(ctypes.c_ulong(0))
     move = INPUT(
         type=INPUT_MOUSE,
         union=INPUT_UNION(
-            mi=MOUSEINPUT(abs_x, abs_y, 0, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, 0, extra)
+            mi=MOUSEINPUT(
+                abs_x,
+                abs_y,
+                0,
+                MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
+                0,
+                extra,
+            )
         ),
     )
     down = INPUT(
@@ -714,7 +824,13 @@ def default_coords_store():
     layouts = {}
     for name, (count, cols) in LAYOUT_PRESETS.items():
         layouts[name] = empty_layout(count, cols)
-    return {"version": 2, "active_layout": "2x2", "layouts": layouts}
+    return {
+        "version": 2,
+        "active_layout": "2x2",
+        "layouts": layouts,
+        # Màn hình được chọn để xếp cửa sổ; rỗng = tự chọn màn hình chính.
+        "selected_monitor_devices": [],
+    }
 
 
 def load_json(path, default):
@@ -777,6 +893,11 @@ def load_coords_store():
     store = default_coords_store()
     if isinstance(raw, dict):
         store["active_layout"] = raw.get("active_layout") or "2x2"
+        selected = raw.get("selected_monitor_devices", [])
+        if isinstance(selected, list):
+            store["selected_monitor_devices"] = [
+                str(device) for device in selected if isinstance(device, str) and device
+            ]
         layouts = raw.get("layouts") or {}
         for name, layout in layouts.items():
             if not isinstance(layout, dict):
@@ -988,9 +1109,12 @@ def clear_megamu_saved_accounts(
 
 def load_autoclick_store():
     """
-    File riêng cho Auto Click:
+    File riêng cho Auto Click, với điểm click theo từng hồ sơ:
     {
-      "points": [{"x": int, "y": int}, ...],
+      "version": 2,
+      "profiles": {
+        "<layout>|<màn hình>": {"points": [{"x": int, "y": int}, ...]}
+      },
       "delay_between": float,
       "run_seconds": float
     }
@@ -998,14 +1122,28 @@ def load_autoclick_store():
     data = load_json(AUTOCLICK_FILE, None)
     if not isinstance(data, dict):
         data = {}
-    points = []
-    for pt in data.get("points") or []:
-        if not isinstance(pt, dict):
+
+    def clean_points(raw_points):
+        points = []
+        for pt in raw_points or []:
+            if not isinstance(pt, dict):
+                continue
+            try:
+                points.append({"x": int(pt["x"]), "y": int(pt["y"])})
+            except Exception:
+                continue
+        return points
+
+    profiles = {}
+    for key, profile in (data.get("profiles") or {}).items():
+        if not isinstance(key, str) or not isinstance(profile, dict):
             continue
-        try:
-            points.append({"x": int(pt["x"]), "y": int(pt["y"])})
-        except Exception:
-            continue
+        profiles[key] = {"points": clean_points(profile.get("points"))}
+
+    # Bản cũ chỉ có một danh sách điểm. Giữ nguyên và chuyển vào hồ sơ hiện
+    # tại khi người dùng lần đầu mở tab Auto Click.
+    if not profiles and data.get("points"):
+        profiles["__legacy__"] = {"points": clean_points(data.get("points"))}
     try:
         delay_between = float(data.get("delay_between", 0.5))
     except Exception:
@@ -1015,19 +1153,28 @@ def load_autoclick_store():
     except Exception:
         run_seconds = 30.0
     return {
-        "points": points,
+        "version": 2,
+        "profiles": profiles,
         "delay_between": max(0.05, delay_between),
         "run_seconds": max(1.0, run_seconds),
     }
 
 
 def save_autoclick_store(store):
+    profiles = {}
+    for key, profile in (store.get("profiles") or {}).items():
+        if not isinstance(key, str) or not isinstance(profile, dict):
+            continue
+        profiles[key] = {
+            "points": [
+                {"x": int(p["x"]), "y": int(p["y"])}
+                for p in (profile.get("points") or [])
+                if isinstance(p, dict) and "x" in p and "y" in p
+            ]
+        }
     payload = {
-        "points": [
-            {"x": int(p["x"]), "y": int(p["y"])}
-            for p in (store.get("points") or [])
-            if isinstance(p, dict) and "x" in p and "y" in p
-        ],
+        "version": 2,
+        "profiles": profiles,
         "delay_between": float(store.get("delay_between", 0.5)),
         "run_seconds": float(store.get("run_seconds", 30.0)),
     }
@@ -1148,6 +1295,9 @@ class MegamuLauncherApp(tk.Tk):
         self.accounts = load_accounts()
         self.coords_store = load_coords_store()
         self.autoclick_store = load_autoclick_store()
+        self.monitor_vars = {}
+        self._monitors = []
+        self._monitor_choices_initialized = False
 
         nb = ttk.Notebook(self)
         nb.grid(row=0, column=0, sticky="nsew")
@@ -1201,6 +1351,8 @@ class MegamuLauncherApp(tk.Tk):
             layouts[name] = layout
         self.coords_store["active_layout"] = name
         save_coords_store(self.coords_store)
+        if hasattr(self, "ac_profile_var"):
+            self._refresh_ac_profile()
         return layouts[name]
 
     def _sync_launch_from_active_layout(self):
@@ -1210,6 +1362,8 @@ class MegamuLauncherApp(tk.Tk):
         if hasattr(self, "layout_var"):
             self.layout_var.set(layout.get("name") or self.active_layout_name())
             self._refresh_slot_ui()
+        if hasattr(self, "ac_profile_var"):
+            self._refresh_ac_profile()
 
     def current_slot_index(self):
         try:
@@ -1225,6 +1379,103 @@ class MegamuLauncherApp(tk.Tk):
             idx = 0
             self.slot_var.set(1)
         return slots[idx], idx
+
+    # ----- monitor selection / tiling -----
+    def _selected_monitors(self):
+        selected_devices = {
+            device for device, var in self.monitor_vars.items() if bool(var.get())
+        }
+        return [m for m in self._monitors if m["device"] in selected_devices]
+
+    def _save_monitor_selection(self):
+        self.coords_store["selected_monitor_devices"] = [
+            m["device"] for m in self._selected_monitors()
+        ]
+        save_coords_store(self.coords_store)
+
+    def _update_monitor_selection_summary(self):
+        if not hasattr(self, "monitor_summary_var"):
+            return
+        count = len(self._selected_monitors())
+        if count:
+            self.monitor_summary_var.set(
+                f"Đã chọn {count} màn hình. Cửa sổ sẽ được chia đều; số cột áp dụng cho từng màn hình."
+            )
+        else:
+            self.monitor_summary_var.set("Chưa chọn màn hình nào.")
+
+    def _on_monitor_selection_changed(self):
+        self._save_monitor_selection()
+        self._update_monitor_selection_summary()
+        if hasattr(self, "ac_profile_var"):
+            self._refresh_ac_profile()
+            self.refresh_ac_window_count()
+
+    def refresh_monitor_choices(self):
+        """Nạp lại màn hình để dùng được cả khi vừa cắm/rút màn hình phụ."""
+        if self._monitor_choices_initialized:
+            selected_devices = {
+                device for device, var in self.monitor_vars.items() if bool(var.get())
+            }
+        else:
+            selected_devices = set(self.coords_store.get("selected_monitor_devices", []))
+
+        self._monitors = list_display_monitors()
+        if not self._monitor_choices_initialized and not selected_devices:
+            selected_devices = {
+                monitor["device"] for monitor in self._monitors if monitor["primary"]
+            }
+
+        for child in self.monitor_choices.winfo_children():
+            child.destroy()
+        self.monitor_vars = {}
+        for row, monitor in enumerate(self._monitors):
+            device = monitor["device"]
+            var = tk.BooleanVar(value=device in selected_devices)
+            self.monitor_vars[device] = var
+            ttk.Checkbutton(
+                self.monitor_choices,
+                text=monitor_label(monitor),
+                variable=var,
+                command=self._on_monitor_selection_changed,
+            ).grid(row=row, column=0, sticky="w")
+
+        self._monitor_choices_initialized = True
+        self._save_monitor_selection()
+        self._update_monitor_selection_summary()
+        if hasattr(self, "ac_profile_var"):
+            self._refresh_ac_profile()
+            self.refresh_ac_window_count()
+
+    def _grid_columns(self, count, monitors):
+        try:
+            requested = int(self.cols_var.get())
+        except Exception:
+            requested = 0
+        if requested > 0:
+            return requested
+        per_monitor = math.ceil(count / max(1, len(monitors)))
+        return max(1, math.ceil(math.sqrt(per_monitor)))
+
+    def _tile_rects_on_monitor(self, count, monitor, cols):
+        left, top, right, bottom = monitor["work"]
+        rows = math.ceil(count / cols)
+        ml, mt = self.margin_left.get(), self.margin_top.get()
+        mr, mb = self.margin_right.get(), self.margin_bottom.get()
+        gap = self.gap.get()
+        usable_w = max(100, (right - left) - ml - mr - gap * max(0, cols - 1))
+        usable_h = max(100, (bottom - top) - mt - mb - gap * max(0, rows - 1))
+        cell_w = max(200, usable_w // cols)
+        cell_h = max(150, usable_h // rows)
+        return [
+            (
+                left + ml + (i % cols) * (cell_w + gap),
+                top + mt + (i // cols) * (cell_h + gap),
+                cell_w,
+                cell_h,
+            )
+            for i in range(count)
+        ], rows
 
     # ----- Launch tab -----
     def _build_launch_tab(self):
@@ -1251,7 +1502,7 @@ class MegamuLauncherApp(tk.Tk):
         ttk.Spinbox(opts, from_=1, to=36, textvariable=self.count_var, width=7).grid(
             row=0, column=1, padx=(6, 16)
         )
-        ttk.Label(opts, text="Số cột:").grid(row=0, column=2, sticky="w")
+        ttk.Label(opts, text="Số cột / màn hình:").grid(row=0, column=2, sticky="w")
         ttk.Spinbox(opts, from_=0, to=12, textvariable=self.cols_var, width=7).grid(
             row=0, column=3, padx=(6, 0)
         )
@@ -1264,8 +1515,21 @@ class MegamuLauncherApp(tk.Tk):
             opts, from_=5.0, to=90.0, increment=1.0, textvariable=self.wait_var, width=7
         ).grid(row=1, column=3, padx=(6, 0), pady=(6, 0))
 
+        monitors = ttk.LabelFrame(frm, text=" Màn hình hiển thị cửa sổ ", padding=8)
+        monitors.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+        self.monitor_choices = ttk.Frame(monitors)
+        self.monitor_choices.grid(row=0, column=0, sticky="w")
+        self.monitor_summary_var = tk.StringVar(value="")
+        ttk.Label(monitors, textvariable=self.monitor_summary_var, foreground="#055").grid(
+            row=1, column=0, sticky="w", pady=(5, 0)
+        )
+        ttk.Button(monitors, text="Làm mới màn hình", width=17, command=self.refresh_monitor_choices).grid(
+            row=1, column=1, sticky="e", padx=(12, 0), pady=(5, 0)
+        )
+        self.refresh_monitor_choices()
+
         margin = ttk.LabelFrame(frm, text=" Lề (px) ", padding=8)
-        margin.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+        margin.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(8, 0))
         self.margin_left = tk.IntVar(value=0)
         self.margin_top = tk.IntVar(value=0)
         self.margin_right = tk.IntVar(value=0)
@@ -1286,7 +1550,7 @@ class MegamuLauncherApp(tk.Tk):
             )
 
         saved = ttk.LabelFrame(frm, text=" Danh sách account đã lưu trong MEGAMU ", padding=8)
-        saved.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+        saved.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(8, 0))
 
         self.clear_before_launch_var = tk.BooleanVar(value=True)
         self.clear_dashboard_var = tk.BooleanVar(value=True)
@@ -1322,7 +1586,7 @@ class MegamuLauncherApp(tk.Tk):
         ).grid(row=4, column=0, sticky="w", pady=(8, 0))
 
         btns = ttk.Frame(frm)
-        btns.grid(row=5, column=0, columnspan=4, sticky="w", pady=(10, 0))
+        btns.grid(row=6, column=0, columnspan=4, sticky="w", pady=(10, 0))
         self.btn_launch = ttk.Button(btns, text="Mở & Sắp xếp", command=self.on_launch, width=16)
         self.btn_launch.pack(side="left", padx=(0, 6))
         self.btn_arrange = ttk.Button(
@@ -1335,7 +1599,7 @@ class MegamuLauncherApp(tk.Tk):
         self.btn_close_all.pack(side="left")
 
         presets = ttk.Frame(frm)
-        presets.grid(row=6, column=0, columnspan=4, sticky="w", pady=(8, 0))
+        presets.grid(row=7, column=0, columnspan=4, sticky="w", pady=(8, 0))
         ttk.Label(presets, text="Preset:").pack(side="left")
         for label, n, c in [("2x2", 4, 2), ("3x2", 6, 3), ("3x3", 9, 3), ("4x3", 12, 4)]:
             ttk.Button(
@@ -1349,7 +1613,7 @@ class MegamuLauncherApp(tk.Tk):
                 r"HKCU\Software\MEGAMU\MEGAMU"
             ),
             foreground="#555",
-        ).grid(row=7, column=0, sticky="w", pady=(8, 0))
+        ).grid(row=8, column=0, sticky="w", pady=(8, 0))
 
         self.refresh_saved_accounts()
 
@@ -1649,7 +1913,7 @@ class MegamuLauncherApp(tk.Tk):
             frm,
             text=(
                 "Account theo thứ tự danh sách (trên→dưới): ô 1←TK1, ô 2←TK2, ...\n"
-                "Thiếu tài khoản thì ô đó bỏ qua (để trống). Chỉ login các ô có TK + đã ghi tọa độ."
+                "Chỉ login các ô trong layout đang có cửa sổ. Dòng account dư sẽ được bỏ qua."
             ),
             foreground="#555",
             justify="left",
@@ -1730,6 +1994,8 @@ class MegamuLauncherApp(tk.Tk):
             self.cols_var.set(layout["cols"])
         self.slot_var.set(1)
         self._refresh_slot_ui()
+        if hasattr(self, "ac_profile_var"):
+            self._refresh_ac_profile()
         self.status.set(f"Đã chọn hồ sơ layout {name}.")
 
     def use_launch_layout(self):
@@ -1976,23 +2242,25 @@ class MegamuLauncherApp(tk.Tk):
         if msg is not None:
             self.status.set(msg)
 
-    def tile_rects(self, count):
-        sw, sh = get_screen_size()
-        cols, rows = calc_grid(count, self.cols_var.get() if self.cols_var.get() > 0 else None)
-        ml, mt = self.margin_left.get(), self.margin_top.get()
-        mr, mb = self.margin_right.get(), self.margin_bottom.get()
-        gap = self.gap.get()
-        usable_w = max(100, sw - ml - mr - gap * max(0, cols - 1))
-        usable_h = max(100, sh - mt - mb - gap * max(0, rows - 1))
-        cell_w = max(200, usable_w // cols)
-        cell_h = max(150, usable_h // rows)
+    def tile_rects(self, count, monitors=None, cols=None):
+        """Chia đều cửa sổ giữa các màn hình đã chọn, rồi tạo lưới trên từng màn hình."""
+        monitors = monitors if monitors is not None else self._selected_monitors()
+        if not monitors:
+            raise ValueError("Chưa chọn màn hình để hiển thị cửa sổ.")
+        cols = cols if cols and cols > 0 else self._grid_columns(count, monitors)
+        base, remainder = divmod(count, len(monitors))
         rects = []
-        for i in range(count):
-            col, row = i % cols, i // cols
-            x = ml + col * (cell_w + gap)
-            y = mt + row * (cell_h + gap)
-            rects.append((x, y, cell_w, cell_h))
-        return rects, cols, rows
+        max_rows = 0
+        for index, monitor in enumerate(monitors):
+            on_this_monitor = base + (1 if index < remainder else 0)
+            if on_this_monitor <= 0:
+                continue
+            monitor_rects, rows = self._tile_rects_on_monitor(
+                on_this_monitor, monitor, cols
+            )
+            rects.extend(monitor_rects)
+            max_rows = max(max_rows, rows)
+        return rects, cols, max_rows
 
     def refresh_saved_accounts(self):
         names = get_saved_account_usernames()
@@ -2075,12 +2343,18 @@ class MegamuLauncherApp(tk.Tk):
         count = int(self.count_var.get())
         if count < 1:
             return
+        monitors = self._selected_monitors()
+        if not monitors:
+            messagebox.showwarning(
+                "Chưa chọn màn hình", "Hãy chọn ít nhất một màn hình để hiển thị cửa sổ."
+            )
+            return
         if not os.path.isfile(path):
             messagebox.showerror("Không tìm thấy", path)
             return
 
         # gắn hồ sơ layout theo cấu hình hiện tại
-        cols = int(self.cols_var.get()) if int(self.cols_var.get()) > 0 else math.ceil(math.sqrt(count))
+        cols = self._grid_columns(count, monitors)
         name = layout_name(count, cols)
         self.ensure_layout(name, count, cols)
         if hasattr(self, "layout_var"):
@@ -2108,7 +2382,7 @@ class MegamuLauncherApp(tk.Tk):
             ):
                 return
 
-        self.set_busy(True, f"Đang mở {count} cửa sổ ({name})...")
+        self.set_busy(True, f"Đang mở {count} cửa sổ ({name}) trên {len(monitors)} màn hình...")
 
         def worker():
             if do_clear:
@@ -2138,11 +2412,11 @@ class MegamuLauncherApp(tk.Tk):
                         ),
                     )
                     return
-            self._launch_worker(path, count)
+            self._launch_worker(path, count, monitors, cols)
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _launch_worker(self, path, count):
+    def _launch_worker(self, path, count, monitors, cols):
         delay = float(self.delay_var.get())
         wait = float(self.wait_var.get())
         before = set(list_game_hwnds())
@@ -2182,14 +2456,15 @@ class MegamuLauncherApp(tk.Tk):
             )
             return
 
-        rects, cols, rows = self.tile_rects(len(to_arrange))
+        rects, cols, rows = self.tile_rects(len(to_arrange), monitors, cols)
         time.sleep(0.8)
         placed = arrange_hwnds(to_arrange, rects, retries=5, retry_delay=0.7)
         self.after(
             0,
             lambda: self.set_busy(
                 False,
-                f"Mở {launched}, sắp {placed}/{len(to_arrange)} (lưới {cols}x{rows}). "
+                f"Mở {launched}, sắp {placed}/{len(to_arrange)} trên {len(monitors)} màn hình "
+                f"(lưới tối đa {cols}x{rows}/màn). "
                 f"Hồ sơ tọa độ: {layout_name(count, cols)}.",
             ),
         )
@@ -2203,7 +2478,13 @@ class MegamuLauncherApp(tk.Tk):
             return
 
         count = len(hwnds)
-        cols = int(self.cols_var.get()) if int(self.cols_var.get()) > 0 else math.ceil(math.sqrt(count))
+        monitors = self._selected_monitors()
+        if not monitors:
+            messagebox.showwarning(
+                "Chưa chọn màn hình", "Hãy chọn ít nhất một màn hình để hiển thị cửa sổ."
+            )
+            return
+        cols = self._grid_columns(count, monitors)
         name = layout_name(count, cols)
         self.ensure_layout(name, count, cols)
         self.count_var.set(count)
@@ -2212,16 +2493,18 @@ class MegamuLauncherApp(tk.Tk):
             self.layout_var.set(name)
             self._refresh_slot_ui()
 
-        self.set_busy(True, f"Đang sắp {count} cửa sổ ({name})...")
+        self.set_busy(True, f"Đang sắp {count} cửa sổ ({name}) trên {len(monitors)} màn hình...")
 
         def worker():
             current = list_game_hwnds()
-            rects, cols, rows = self.tile_rects(len(current))
+            rects, used_cols, rows = self.tile_rects(len(current), monitors, cols)
             placed = arrange_hwnds(current, rects, retries=5, retry_delay=0.5)
             self.after(
                 0,
                 lambda: self.set_busy(
-                    False, f"Đã sắp {placed}/{len(current)} cửa sổ ({cols}x{rows})."
+                    False,
+                    f"Đã sắp {placed}/{len(current)} cửa sổ trên {len(monitors)} màn hình "
+                    f"(lưới tối đa {used_cols}x{rows}/màn).",
                 ),
             )
 
@@ -2272,30 +2555,25 @@ class MegamuLauncherApp(tk.Tk):
 
     def _build_login_plan(self, hwnds):
         """
-        Ghép ô/cửa sổ/account theo index.
-        Ô không có account → bỏ qua (để trống).
-        Chỉ yêu cầu tọa độ cho các ô sẽ login.
+        Ghép account theo thứ tự bố cục cửa sổ (trên→dưới, trái→phải).
+        Chỉ xét các ô vừa có trong layout vừa đang có cửa sổ; các dòng account
+        dư không làm chặn Auto Login.
         """
         layout = self.active_layout()
         slot_count = layout["count"]
         plan = []  # list of dicts: index, hwnd, acc, slot
         skipped_empty = []
         missing_coords = []
-        missing_window = []
+        usable_count = min(len(hwnds), slot_count)
 
-        max_i = max(len(hwnds), len(self.accounts), slot_count)
-        for i in range(max_i):
+        for i in range(usable_count):
             acc = self._account_at(i)
             if not acc:
-                if i < slot_count:
-                    skipped_empty.append(i + 1)
+                skipped_empty.append(i + 1)
                 continue
 
-            # Có account → cần cửa sổ + tọa độ tương ứng
-            if i >= len(hwnds):
-                missing_window.append(i + 1)
-                continue
-            if i >= slot_count or i >= len(layout["slots"]):
+            # Có account trong ô đang hiển thị → cần tọa độ tương ứng.
+            if i >= len(layout["slots"]):
                 missing_coords.append(i + 1)
                 continue
             slot = layout["slots"][i]
@@ -2312,7 +2590,12 @@ class MegamuLauncherApp(tk.Tk):
                 }
             )
 
-        return plan, skipped_empty, missing_coords, missing_window
+        # Account ở dưới các cửa sổ/layout hiện có được để nguyên trong danh
+        # sách, nhưng không tự động login trong lần chạy này.
+        unused_accounts = [
+            i + 1 for i in range(usable_count, len(self.accounts)) if self._account_at(i)
+        ]
+        return plan, skipped_empty, missing_coords, unused_accounts
 
     def on_stop_login(self):
         self._stop_login = True
@@ -2380,7 +2663,7 @@ class MegamuLauncherApp(tk.Tk):
             return
 
         layout = self.active_layout()
-        plan, skipped_empty, missing_coords, missing_window = self._build_login_plan(hwnds)
+        plan, skipped_empty, missing_coords, unused_accounts = self._build_login_plan(hwnds)
 
         if missing_coords:
             messagebox.showwarning(
@@ -2388,14 +2671,6 @@ class MegamuLauncherApp(tk.Tk):
                 f"Các ô có tài khoản nhưng chưa ghi tọa độ: {missing_coords}\n"
                 "Ghi từng ô, hoặc ghi ô 1 rồi 'Chép ô 1 → tất cả ô'.\n"
                 f"Các ô không có TK sẽ bỏ qua: {skipped_empty or '—'}",
-            )
-            return
-
-        if missing_window:
-            messagebox.showwarning(
-                "Thiếu cửa sổ",
-                f"Có tài khoản ở dòng {missing_window} nhưng chưa đủ cửa sổ game đang mở.\n"
-                f"Đang mở {len(hwnds)} cửa sổ.",
             )
             return
 
@@ -2410,12 +2685,18 @@ class MegamuLauncherApp(tk.Tk):
         skip_txt = (
             f"\nÔ để trống (không có TK): {skipped_empty}" if skipped_empty else ""
         )
+        unused_txt = (
+            f"\nDòng account chưa dùng (vượt số ô/cửa sổ): {unused_accounts}"
+            if unused_accounts
+            else ""
+        )
         if not messagebox.askyesno(
             "Xác nhận Auto Login",
             f"Layout {layout.get('name')}\n"
             f"Sẽ login {len(plan)} ô: "
             + ", ".join(f"#{p['index'] + 1}={p['acc']['username']}" for p in plan)
             + skip_txt
+            + unused_txt
             + "\nTiếp tục?",
         ):
             return
@@ -2491,20 +2772,83 @@ class MegamuLauncherApp(tk.Tk):
         self.set_busy(False, msg)
 
     # ----- Auto Click tab -----
+    def _ac_profile_context(self):
+        layout_name = self.active_layout().get("name") or self.active_layout_name()
+        devices = tuple(monitor["device"] for monitor in self._selected_monitors())
+        return layout_name, devices
+
+    def _ac_profile_key(self):
+        layout_name, devices = self._ac_profile_context()
+        return f"{layout_name}||{'|'.join(devices) if devices else '(chưa chọn màn hình)'}"
+
+    def _ac_profile_description(self):
+        layout_name, devices = self._ac_profile_context()
+        screens = ", ".join(devices) if devices else "chưa chọn màn hình"
+        return f"Layout {layout_name} | {screens}"
+
+    def _current_ac_profile(self):
+        profiles = self.autoclick_store.setdefault("profiles", {})
+        key = self._ac_profile_key()
+        profile = profiles.get(key)
+        if not isinstance(profile, dict):
+            # Migrate danh sách điểm duy nhất của bản cũ vào profile đầu tiên.
+            legacy = profiles.pop("__legacy__", None)
+            points = legacy.get("points", []) if isinstance(legacy, dict) else []
+            profile = {"points": list(points)}
+            profiles[key] = profile
+        if not isinstance(profile.get("points"), list):
+            profile["points"] = []
+        return profile
+
+    def _ac_points(self):
+        return self._current_ac_profile()["points"]
+
+    def _refresh_ac_profile(self):
+        profile = self._current_ac_profile()
+        if hasattr(self, "ac_profile_var"):
+            self.ac_profile_var.set(
+                f"Hồ sơ điểm: {self._ac_profile_description()}  |  {len(profile['points'])} điểm"
+            )
+        if hasattr(self, "ac_list"):
+            self._refresh_ac_list()
+
+    def _ac_game_hwnds(self):
+        """Chỉ lấy cửa sổ nằm trên các màn hình hiện được chọn."""
+        monitors = self._selected_monitors()
+        if not monitors:
+            return []
+        hwnds = []
+        for hwnd in list_game_hwnds():
+            x, y, w, h = get_window_rect(hwnd)
+            center_x, center_y = x + w // 2, y + h // 2
+            if any(
+                left <= center_x < right and top <= center_y < bottom
+                for left, top, right, bottom in (m["monitor"] for m in monitors)
+            ):
+                hwnds.append(hwnd)
+        return hwnds
+
     def _build_autoclick_tab(self):
         frm = self.tab_autoclick
         ttk.Label(
             frm,
             text=(
-                "Chức năng riêng: chọn điểm click tuyệt đối trên màn hình theo số cửa sổ "
-                "MEGAMU đang mở. Mỗi lần click chuột trái = 1 điểm, đến đủ số cửa sổ thì dừng chọn."
+                "Điểm click được lưu riêng theo layout và các màn hình đã chọn. "
+                "Mỗi lần click chuột trái = 1 điểm, đến đủ số cửa sổ trong hồ sơ hiện tại thì dừng chọn."
             ),
             wraplength=620,
             justify="left",
         ).grid(row=0, column=0, columnspan=4, sticky="w")
 
+        profile = ttk.LabelFrame(frm, text=" Hồ sơ điểm đang dùng ", padding=8)
+        profile.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+        self.ac_profile_var = tk.StringVar(value="")
+        ttk.Label(profile, textvariable=self.ac_profile_var, foreground="#055", wraplength=620).grid(
+            row=0, column=0, sticky="w"
+        )
+
         info = ttk.LabelFrame(frm, text=" Số điểm ", padding=8)
-        info.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+        info.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(10, 0))
         self.ac_window_count_var = tk.StringVar(value="Cửa sổ đang mở: 0")
         ttk.Label(info, textvariable=self.ac_window_count_var).grid(
             row=0, column=0, sticky="w"
@@ -2515,7 +2859,7 @@ class MegamuLauncherApp(tk.Tk):
         self.btn_ac_refresh.grid(row=0, column=1, padx=(12, 0))
 
         timing = ttk.LabelFrame(frm, text=" Thời gian ", padding=8)
-        timing.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+        timing.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(10, 0))
         self.ac_delay_var = tk.DoubleVar(
             value=float(self.autoclick_store.get("delay_between", 0.5))
         )
@@ -2546,13 +2890,13 @@ class MegamuLauncherApp(tk.Tk):
         ).grid(row=0, column=3, padx=(6, 0), sticky="w")
 
         pts = ttk.LabelFrame(frm, text=" Danh sách điểm (tọa độ màn hình) ", padding=8)
-        pts.grid(row=3, column=0, columnspan=4, sticky="nsew", pady=(10, 0))
+        pts.grid(row=4, column=0, columnspan=4, sticky="nsew", pady=(10, 0))
         self.ac_list = tk.Listbox(pts, height=10, width=72, exportselection=False)
         self.ac_list.grid(row=0, column=0, columnspan=4, sticky="nsew")
         pts.columnconfigure(0, weight=1)
 
         btns = ttk.Frame(frm)
-        btns.grid(row=4, column=0, columnspan=4, sticky="w", pady=(10, 0))
+        btns.grid(row=5, column=0, columnspan=4, sticky="w", pady=(10, 0))
         self.btn_ac_pick = ttk.Button(
             btns, text="Chọn điểm (click chuột)", width=22, command=self.on_ac_start_pick
         )
@@ -2574,22 +2918,25 @@ class MegamuLauncherApp(tk.Tk):
             value="Esc để hủy khi đang chọn điểm. F8 không dùng ở tab này."
         )
         ttk.Label(frm, textvariable=self.ac_status_var, wraplength=620).grid(
-            row=5, column=0, columnspan=4, sticky="w", pady=(10, 0)
+            row=6, column=0, columnspan=4, sticky="w", pady=(10, 0)
         )
 
         self.refresh_ac_window_count()
-        self._refresh_ac_list()
+        self._refresh_ac_profile()
 
     def refresh_ac_window_count(self):
-        n = len(list_game_hwnds())
-        self.ac_window_count_var.set(f"Cửa sổ đang mở: {n}  →  cần chọn {n} điểm")
+        n = len(self._ac_game_hwnds())
+        monitor_count = len(self._selected_monitors())
+        self.ac_window_count_var.set(
+            f"Cửa sổ trong {monitor_count} màn hình đã chọn: {n}  →  cần chọn {n} điểm"
+        )
         return n
 
     def _refresh_ac_list(self):
         if not hasattr(self, "ac_list"):
             return
         self.ac_list.delete(0, tk.END)
-        points = self.autoclick_store.get("points") or []
+        points = self._ac_points()
         if not points:
             self.ac_list.insert(tk.END, "(chưa có điểm)")
             return
@@ -2612,9 +2959,9 @@ class MegamuLauncherApp(tk.Tk):
             return
         if not messagebox.askyesno("Xác nhận", "Xóa toàn bộ điểm Auto Click đã chọn?"):
             return
-        self.autoclick_store["points"] = []
+        self._ac_points().clear()
         save_autoclick_store(self.autoclick_store)
-        self._refresh_ac_list()
+        self._refresh_ac_profile()
         self.ac_status_var.set("Đã xóa danh sách điểm.")
         self.status.set("Đã xóa điểm Auto Click.")
 
@@ -2646,10 +2993,10 @@ class MegamuLauncherApp(tk.Tk):
         ):
             return
 
-        # xóa điểm cũ rồi bắt đầu chọn
-        self.autoclick_store["points"] = []
+        # Xóa điểm cũ của đúng hồ sơ hiện tại rồi bắt đầu chọn.
+        self._ac_points().clear()
         save_autoclick_store(self.autoclick_store)
-        self._refresh_ac_list()
+        self._refresh_ac_profile()
 
         self._ac_picking = True
         self._ac_pick_needed = needed
@@ -2697,11 +3044,12 @@ class MegamuLauncherApp(tk.Tk):
             pt = POINT()
             user32.GetCursorPos(ctypes.byref(pt))
             x, y = int(pt.x), int(pt.y)
-            self.autoclick_store.setdefault("points", []).append({"x": x, "y": y})
+            points = self._ac_points()
+            points.append({"x": x, "y": y})
             save_autoclick_store(self.autoclick_store)
-            self._refresh_ac_list()
+            self._refresh_ac_profile()
 
-            got = len(self.autoclick_store["points"])
+            got = len(points)
             needed = self._ac_pick_needed
             self.status.set(f"Đã ghi điểm {got}/{needed}: ({x}, {y})")
             self.ac_status_var.set(
@@ -2731,7 +3079,7 @@ class MegamuLauncherApp(tk.Tk):
         if self._busy or self._ac_picking or self._ac_running:
             return
         self._persist_ac_timing()
-        points = list(self.autoclick_store.get("points") or [])
+        points = list(self._ac_points())
         if not points:
             messagebox.showwarning(
                 "Chưa có điểm",
@@ -2742,6 +3090,7 @@ class MegamuLauncherApp(tk.Tk):
         run_seconds = max(1.0, float(self.autoclick_store.get("run_seconds", 30.0)))
         if not messagebox.askyesno(
             "Bắt đầu Auto Click",
+            f"{self._ac_profile_description()}\n"
             f"Sẽ click lần lượt {len(points)} điểm,\n"
             f"cách nhau {delay:.2f}s, chạy trong {run_seconds:.0f}s rồi tự dừng.\n"
             "Có thể bấm Dừng bất cứ lúc nào.\n\nTiếp tục?",
@@ -2834,6 +3183,7 @@ class MegamuLauncherApp(tk.Tk):
 
 
 def main():
+    enable_per_monitor_dpi_awareness()
     # Root ẩn cho các gate (update → license), rồi mở app chính.
     boot = tk.Tk()
     boot.withdraw()
