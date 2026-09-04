@@ -21,7 +21,12 @@ import winreg
 from ctypes import wintypes
 from tkinter import messagebox, ttk
 
-from muclick_gates import run_license_gate, run_update_gate
+from muclick_gates import (
+    is_admin_password,
+    run_admin_license_dialog,
+    run_license_gate,
+    run_update_gate,
+)
 from muclick_paths import APP_VERSION, data_path, install_dir, migrate_user_files
 
 # ---------------------------------------------------------------------------
@@ -112,6 +117,24 @@ AUTOCLICK_FILE = data_path("autoclick_points.json")
 
 # Unity PlayerPrefs: danh sách account đã đăng nhập
 REG_MEGAMU = (winreg.HKEY_CURRENT_USER, r"Software\MEGAMU\MEGAMU")
+
+MEGAMU_PATH = r"C:\Users\donpv\AppData\Local\Programs\MEGAMU\MEGAMU.exe"
+MEGAMU_DIR = r"C:\Users\donpv\AppData\Local\Programs\MEGAMU"
+DASHBOARD_PATH = os.path.join(MEGAMU_DIR, "Dashboard.exe")
+MEGAMU_CONFIG_INI = os.path.join(MEGAMU_DIR, "config.ini")
+UNITY_CLASS = "UnityWndClass"
+MEGAMU_PROCESS_NAMES = ("MEGAMU.exe", "Dashboard.exe")
+APP_DIR = install_dir()
+# Dữ liệu user nằm %APPDATA%\MuClick (survive khi update thay exe)
+migrate_user_files(
+    ("accounts.json", "click_coords.json", "autoclick_points.json")
+)
+ACCOUNTS_FILE = data_path("accounts.json")
+COORDS_FILE = data_path("click_coords.json")
+AUTOCLICK_FILE = data_path("autoclick_points.json")
+
+# Unity PlayerPrefs: danh sách account đã đăng nhập
+REG_MEGAMU = (winreg.HKEY_CURRENT_USER, r"Software\MEGAMU\MEGAMU")
 REG_ACCOUNT_LIST = "AccountList_h1682150822"
 REG_SETTINGS = "Settings_h649772672"
 
@@ -129,6 +152,10 @@ LAYOUT_PRESETS = {
     "3x3": (9, 3),
     "4x3": (12, 4),
 }
+
+# Cấu hình Zen
+ZEN_PER_CLICK = 10_000_000        # Trừ 10.000.000 Zen / 1 lần click
+ZEN_WARN_THRESHOLD = 200_000_000  # Cảnh báo khi dưới 200.000.000 Zen
 
 EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
 
@@ -833,6 +860,46 @@ def default_coords_store():
     }
 
 
+def parse_zen(val) -> int:
+    """Chuyển đổi chuỗi/số thành số nguyên Zen. Hỗ trợ: 1000000, 1.000.000, 1,000,000, 500M, 1.5B, 2B..."""
+    if val is None or val == "":
+        return 0
+    if isinstance(val, (int, float)):
+        return max(0, int(val))
+    s = str(val).strip().lower().replace(" ", "")
+    if not s:
+        return 0
+    multiplier = 1
+    if s.endswith("k"):
+        multiplier = 1_000
+        s = s[:-1]
+    elif s.endswith("m") or s.endswith("tr"):
+        multiplier = 1_000_000
+        s = s.rstrip("mtr")
+    elif s.endswith("b") or s.endswith("t") or s.endswith("ty") or s.endswith("tỷ"):
+        multiplier = 1_000_000_000
+        s = s.rstrip("btyỷ")
+
+    if multiplier > 1:
+        s = s.replace(",", ".")
+    else:
+        s = s.replace(",", "").replace(".", "")
+
+    try:
+        return max(0, int(float(s) * multiplier))
+    except Exception:
+        return 0
+
+
+def format_zen(val: int) -> str:
+    """Format số Zen có phân cách chấm (ví dụ: 1.000.000.000)."""
+    try:
+        n = int(val)
+        return f"{n:,}".replace(",", ".")
+    except Exception:
+        return "0"
+
+
 def load_json(path, default):
     try:
         if os.path.isfile(path):
@@ -850,7 +917,13 @@ def save_json(path, data):
 
 def load_accounts():
     data = load_json(ACCOUNTS_FILE, {"accounts": []})
-    return data.get("accounts", [])
+    accounts = data.get("accounts", [])
+    for acc in accounts:
+        if "zen" in acc:
+            acc["zen"] = parse_zen(acc["zen"])
+        else:
+            acc["zen"] = 0
+    return accounts
 
 
 def save_accounts(accounts):
@@ -1319,14 +1392,38 @@ class MegamuLauncherApp(tk.Tk):
         # Đồng bộ layout từ store
         self._sync_launch_from_active_layout()
 
+        status_frame = ttk.Frame(self)
+        status_frame.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+
         self.status = tk.StringVar(value="Sẵn sàng.")
-        ttk.Label(self, textvariable=self.status, wraplength=620).grid(
-            row=1, column=0, sticky="w", pady=(8, 0)
+        ttk.Label(status_frame, textvariable=self.status, wraplength=480).pack(
+            side="left", fill="x", expand=True
         )
+        ttk.Button(
+            status_frame,
+            text="🔑 Quản lý License",
+            command=self.open_admin_license,
+            width=17,
+        ).pack(side="right", padx=(8, 0))
 
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.bind("<F8>", self._on_f8)
         self.bind("<Escape>", self._on_escape)
+
+    def open_admin_license(self):
+        import tkinter.simpledialog as simpledialog
+        pwd = simpledialog.askstring(
+            "Admin Login",
+            "Nhập mật khẩu quản trị (admin):",
+            show="*",
+            parent=self,
+        )
+        if pwd is None:
+            return
+        if not is_admin_password(pwd):
+            messagebox.showerror("Lỗi", "Mật khẩu quản trị không đúng!", parent=self)
+            return
+        run_admin_license_dialog(self)
 
     # ----- layout helpers -----
     def active_layout_name(self):
@@ -1621,32 +1718,48 @@ class MegamuLauncherApp(tk.Tk):
     def _build_accounts_tab(self):
         frm = self.tab_accounts
 
-        cols = ("user", "pass")
-        self.acc_tree = ttk.Treeview(frm, columns=cols, show="headings", height=12)
+        cols = ("slot", "user", "pass", "zen", "status")
+        self.acc_tree = ttk.Treeview(frm, columns=cols, show="headings", height=11)
+        self.acc_tree.heading("slot", text="Vị trí")
         self.acc_tree.heading("user", text="Tài khoản")
         self.acc_tree.heading("pass", text="Mật khẩu")
-        self.acc_tree.column("user", width=220)
-        self.acc_tree.column("pass", width=220)
-        self.acc_tree.grid(row=0, column=0, columnspan=4, sticky="nsew")
+        self.acc_tree.heading("zen", text="Zen hiện có")
+        self.acc_tree.heading("status", text="Trạng thái")
+        self.acc_tree.column("slot", width=55, anchor="center")
+        self.acc_tree.column("user", width=140)
+        self.acc_tree.column("pass", width=110)
+        self.acc_tree.column("zen", width=130, anchor="e")
+        self.acc_tree.column("status", width=120, anchor="center")
+        self.acc_tree.tag_configure("low_zen", foreground="#c00000")
+        self.acc_tree.tag_configure("normal", foreground="#000000")
+        self.acc_tree.grid(row=0, column=0, columnspan=6, sticky="nsew")
         self.acc_tree.bind("<<TreeviewSelect>>", self._on_acc_select)
 
         sb = ttk.Scrollbar(frm, orient="vertical", command=self.acc_tree.yview)
         self.acc_tree.configure(yscrollcommand=sb.set)
-        sb.grid(row=0, column=4, sticky="ns")
+        sb.grid(row=0, column=6, sticky="ns")
 
-        ttk.Label(frm, text="User:").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        inp_frm = ttk.Frame(frm)
+        inp_frm.grid(row=1, column=0, columnspan=6, sticky="w", pady=(8, 0))
+
+        ttk.Label(inp_frm, text="User:").pack(side="left")
         self.user_var = tk.StringVar()
-        ttk.Entry(frm, textvariable=self.user_var, width=24).grid(
-            row=1, column=1, sticky="w", pady=(8, 0)
-        )
-        ttk.Label(frm, text="Pass:").grid(row=1, column=2, sticky="w", padx=(8, 0), pady=(8, 0))
+        ttk.Entry(inp_frm, textvariable=self.user_var, width=15).pack(side="left", padx=(4, 8))
+
+        ttk.Label(inp_frm, text="Pass:").pack(side="left")
         self.pass_var = tk.StringVar()
-        ttk.Entry(frm, textvariable=self.pass_var, width=24, show="*").grid(
-            row=1, column=3, sticky="w", pady=(8, 0)
-        )
+        ttk.Entry(inp_frm, textvariable=self.pass_var, width=13, show="*").pack(side="left", padx=(4, 8))
+
+        ttk.Label(inp_frm, text="Zen:").pack(side="left")
+        self.zen_var = tk.StringVar(value="0")
+        ttk.Entry(inp_frm, textvariable=self.zen_var, width=15).pack(side="left", padx=(4, 6))
+
+        ttk.Button(inp_frm, text="+500M", width=6, command=lambda: self._quick_add_zen(500_000_000)).pack(side="left", padx=2)
+        ttk.Button(inp_frm, text="+1B", width=5, command=lambda: self._quick_add_zen(1_000_000_000)).pack(side="left", padx=2)
+        ttk.Button(inp_frm, text="2B", width=4, command=lambda: self.zen_var.set("2.000.000.000")).pack(side="left", padx=2)
 
         bf = ttk.Frame(frm)
-        bf.grid(row=2, column=0, columnspan=4, sticky="w", pady=(8, 0))
+        bf.grid(row=2, column=0, columnspan=6, sticky="w", pady=(8, 0))
         ttk.Button(bf, text="Thêm", command=self.acc_add, width=10).pack(side="left", padx=(0, 6))
         ttk.Button(bf, text="Sửa dòng chọn", command=self.acc_edit, width=14).pack(
             side="left", padx=(0, 6)
@@ -1666,21 +1779,39 @@ class MegamuLauncherApp(tk.Tk):
             frm,
             text=(
                 f"Lưu tại: {ACCOUNTS_FILE}\n"
-                "Thứ tự trên→dưới = ô 1, ô 2, ô 3... "
-                "Ít hơn số cửa sổ thì các ô còn lại để trống (không login)."
+                "• Thứ tự trên→dưới = Slot 1, Slot 2, Slot 3... tương ứng với từng điểm click trong Auto Click.\n"
+                "• Auto Click: Mỗi lần click trừ 10.000.000 Zen. Khi còn dưới 200.000.000 Zen hệ thống sẽ bật cảnh báo."
             ),
             foreground="#555",
             justify="left",
-        ).grid(row=3, column=0, columnspan=4, sticky="w", pady=(10, 0))
+        ).grid(row=3, column=0, columnspan=6, sticky="w", pady=(10, 0))
 
         self._refresh_acc_tree()
+
+    def _quick_add_zen(self, delta):
+        cur = parse_zen(self.zen_var.get())
+        new_val = min(2_000_000_000, cur + delta)
+        self.zen_var.set(format_zen(new_val))
 
     def _refresh_acc_tree(self):
         for i in self.acc_tree.get_children():
             self.acc_tree.delete(i)
-        for acc in self.accounts:
+        for idx, acc in enumerate(self.accounts):
             shown_pass = "*" * min(len(acc.get("password", "")), 12) or ""
-            self.acc_tree.insert("", "end", values=(acc.get("username", ""), shown_pass))
+            zen = parse_zen(acc.get("zen", 0))
+            zen_txt = format_zen(zen)
+            if zen < ZEN_WARN_THRESHOLD:
+                status_txt = "⚠️ < 200M Zen"
+                tag = "low_zen"
+            else:
+                status_txt = "Bình thường"
+                tag = "normal"
+            self.acc_tree.insert(
+                "",
+                "end",
+                values=(f"Slot {idx + 1}", acc.get("username", ""), shown_pass, zen_txt, status_txt),
+                tags=(tag,),
+            )
 
     def _on_acc_select(self, _event=None):
         sel = self.acc_tree.selection()
@@ -1690,16 +1821,20 @@ class MegamuLauncherApp(tk.Tk):
         if 0 <= idx < len(self.accounts):
             self.user_var.set(self.accounts[idx].get("username", ""))
             self.pass_var.set(self.accounts[idx].get("password", ""))
+            zen = self.accounts[idx].get("zen", 0)
+            self.zen_var.set(format_zen(zen))
 
     def acc_add(self):
         u = self.user_var.get().strip()
         p = self.pass_var.get()
+        z = parse_zen(self.zen_var.get())
         if not u:
             messagebox.showwarning("Thiếu dữ liệu", "Nhập tài khoản.")
             return
-        self.accounts.append({"username": u, "password": p})
+        self.accounts.append({"username": u, "password": p, "zen": z})
         self.user_var.set("")
         self.pass_var.set("")
+        self.zen_var.set("0")
         self._refresh_acc_tree()
         save_accounts(self.accounts)
         self.status.set(f"Đã thêm tài khoản. Tổng: {len(self.accounts)}")
@@ -1711,10 +1846,11 @@ class MegamuLauncherApp(tk.Tk):
         idx = self.acc_tree.index(sel[0])
         u = self.user_var.get().strip()
         p = self.pass_var.get()
+        z = parse_zen(self.zen_var.get())
         if not u:
             messagebox.showwarning("Thiếu dữ liệu", "Nhập tài khoản.")
             return
-        self.accounts[idx] = {"username": u, "password": p}
+        self.accounts[idx] = {"username": u, "password": p, "zen": z}
         self._refresh_acc_tree()
         save_accounts(self.accounts)
         self.status.set(f"Đã sửa tài khoản #{idx + 1}")
@@ -2921,6 +3057,18 @@ class MegamuLauncherApp(tk.Tk):
             row=6, column=0, columnspan=4, sticky="w", pady=(10, 0)
         )
 
+        self.ac_zen_warn_var = tk.StringVar(value="")
+        self.lbl_ac_zen_warn = ttk.Label(
+            frm,
+            textvariable=self.ac_zen_warn_var,
+            foreground="#c00000",
+            font=("Segoe UI", 9, "bold"),
+            wraplength=620,
+        )
+        self.lbl_ac_zen_warn.grid(
+            row=7, column=0, columnspan=4, sticky="w", pady=(4, 0)
+        )
+
         self.refresh_ac_window_count()
         self._refresh_ac_profile()
 
@@ -3093,6 +3241,7 @@ class MegamuLauncherApp(tk.Tk):
             f"{self._ac_profile_description()}\n"
             f"Sẽ click lần lượt {len(points)} điểm,\n"
             f"cách nhau {delay:.2f}s, chạy trong {run_seconds:.0f}s rồi tự dừng.\n"
+            f"Mỗi click trừ 10.000.000 Zen của tài khoản tương ứng.\n"
             "Có thể bấm Dừng bất cứ lúc nào.\n\nTiếp tục?",
         ):
             return
@@ -3101,33 +3250,63 @@ class MegamuLauncherApp(tk.Tk):
         self._stop_autoclick = False
         self.set_busy(True, f"Auto Click: 0s / {run_seconds:.0f}s...")
         self.btn_ac_stop.configure(state="normal")
-        # giữ nút Dừng bấm được khi busy
         try:
             self.btn_ac_stop.configure(state="normal")
         except Exception:
             pass
+
+        self.ac_zen_warn_var.set("")
 
         def worker():
             start = time.time()
             clicks = 0
             idx = 0
             err = None
+            last_save_time = start
+            warned_slots = set()
+
             try:
                 while not self._stop_autoclick:
                     elapsed = time.time() - start
                     if elapsed >= run_seconds:
                         break
-                    pt = points[idx % len(points)]
+                    p_idx = idx % len(points)
+                    pt = points[p_idx]
                     mouse_click_screen(pt["x"], pt["y"], settle=0.05, hwnd=None)
                     clicks += 1
                     idx += 1
+
+                    # Trừ 10.000.000 Zen cho tài khoản tương ứng
+                    warn_msg = None
+                    if p_idx < len(self.accounts):
+                        acc = self.accounts[p_idx]
+                        cur_zen = parse_zen(acc.get("zen", 0))
+                        new_zen = max(0, cur_zen - ZEN_PER_CLICK)
+                        acc["zen"] = new_zen
+
+                        if new_zen < ZEN_WARN_THRESHOLD:
+                            slot_num = p_idx + 1
+                            u_name = acc.get("username", f"Slot {slot_num}")
+                            warn_msg = f"⚠️ CẢNH BÁO: Slot {slot_num} ({u_name}) còn {format_zen(new_zen)} Zen (< 200M)!"
+                            if slot_num not in warned_slots:
+                                warned_slots.add(slot_num)
+                                try:
+                                    user32.MessageBeep(0x00000030)
+                                except Exception:
+                                    pass
+
                     self.after(
                         0,
-                        lambda e=elapsed, c=clicks, i=idx: self.status.set(
-                            f"Auto Click: {e:.1f}s/{run_seconds:.0f}s | "
-                            f"click #{c} tại điểm {(i - 1) % len(points) + 1}/{len(points)}"
+                        lambda e=elapsed, c=clicks, i=p_idx + 1, wm=warn_msg: self._on_ac_tick(
+                            e, run_seconds, c, i, len(points), wm
                         ),
                     )
+
+                    # Lưu accounts định kỳ mỗi 5s
+                    if time.time() - last_save_time >= 5.0:
+                        save_accounts(self.accounts)
+                        last_save_time = time.time()
+
                     # ngủ theo delay, nhưng vẫn kiểm tra stop / hết giờ
                     end_sleep = time.time() + delay
                     while time.time() < end_sleep:
@@ -3139,9 +3318,15 @@ class MegamuLauncherApp(tk.Tk):
             except Exception as e:
                 err = str(e)
 
+            try:
+                save_accounts(self.accounts)
+            except Exception:
+                pass
+
             def done():
                 self._ac_running = False
                 self.btn_ac_stop.configure(state="disabled")
+                self._refresh_acc_tree()
                 elapsed = time.time() - start
                 if self._stop_autoclick:
                     msg = f"Đã dừng Auto Click sau {elapsed:.1f}s ({clicks} click)."
@@ -3158,6 +3343,17 @@ class MegamuLauncherApp(tk.Tk):
             self.after(0, done)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _on_ac_tick(self, elapsed, run_seconds, clicks, point_idx, total_points, warn_msg):
+        status_txt = (
+            f"Auto Click: {elapsed:.1f}s/{run_seconds:.0f}s | "
+            f"click #{clicks} tại điểm {point_idx}/{total_points}"
+        )
+        if warn_msg:
+            status_txt += f" | {warn_msg}"
+            self.ac_zen_warn_var.set(warn_msg)
+        self.status.set(status_txt)
+        self._refresh_acc_tree()
 
     def on_ac_stop(self):
         self._stop_autoclick = True
