@@ -4,6 +4,18 @@ cd /d "%~dp0"
 
 echo === MuClick build ===
 
+REM PyInstaller phai xoa file cu truoc khi tao EXE moi. Windows khong cho
+REM xoa khi MuClick.exe dang chay, nen dung som voi thong bao de hieu.
+tasklist /FI "IMAGENAME eq MuClick.exe" /NH | findstr /I /C:"MuClick.exe" >nul
+if not errorlevel 1 (
+  echo.
+  echo [ERROR] MuClick.exe dang chay va dang khoa dist\MuClick.exe.
+  echo Hay dong tat ca cua so MuClick, sau do chay lai build_exe.bat.
+  echo.
+  pause
+  exit /b 1
+)
+
 python tools\check_license_token.py
 if errorlevel 1 (
   echo.

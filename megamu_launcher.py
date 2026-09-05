@@ -2217,6 +2217,9 @@ class MegamuLauncherApp(tk.Tk):
             self._do_capture()
 
     def _on_escape(self, _event=None):
+        if self._ac_running:
+            self.on_ac_stop()
+            return
         if self._ac_picking:
             self._cancel_ac_pick("Đã hủy chọn điểm Auto Click.")
             return
@@ -3051,7 +3054,7 @@ class MegamuLauncherApp(tk.Tk):
         self.btn_ac_stop.pack(side="left")
 
         self.ac_status_var = tk.StringVar(
-            value="Esc để hủy khi đang chọn điểm. F8 không dùng ở tab này."
+            value="Esc để dừng khi đang chạy hoặc hủy khi đang chọn điểm. F8 không dùng ở tab này."
         )
         ttk.Label(frm, textvariable=self.ac_status_var, wraplength=620).grid(
             row=6, column=0, columnspan=4, sticky="w", pady=(10, 0)
@@ -3175,7 +3178,7 @@ class MegamuLauncherApp(tk.Tk):
     def _poll_ac_pick(self):
         if not self._ac_picking:
             return
-        if user32.GetAsyncKeyState(VK_ESCAPE) & 0x0001:
+        if (user32.GetAsyncKeyState(VK_ESCAPE) & 0x8000) or (user32.GetAsyncKeyState(VK_ESCAPE) & 0x0001):
             self._cancel_ac_pick()
             return
 
@@ -3242,13 +3245,13 @@ class MegamuLauncherApp(tk.Tk):
             f"Sẽ click lần lượt {len(points)} điểm,\n"
             f"cách nhau {delay:.2f}s, chạy trong {run_seconds:.0f}s rồi tự dừng.\n"
             f"Mỗi click trừ 10.000.000 Zen của tài khoản tương ứng.\n"
-            "Có thể bấm Dừng bất cứ lúc nào.\n\nTiếp tục?",
+            "Có thể bấm Dừng hoặc nhấn phím ESC bất cứ lúc nào.\n\nTiếp tục?",
         ):
             return
 
         self._ac_running = True
         self._stop_autoclick = False
-        self.set_busy(True, f"Auto Click: 0s / {run_seconds:.0f}s...")
+        self.set_busy(True, f"Auto Click (ESC để dừng): 0s / {run_seconds:.0f}s...")
         self.btn_ac_stop.configure(state="normal")
         try:
             self.btn_ac_stop.configure(state="normal")
@@ -3265,8 +3268,16 @@ class MegamuLauncherApp(tk.Tk):
             last_save_time = start
             warned_slots = set()
 
+            # Xóa trạng thái phím ESC còn tồn trước khi vào vòng lặp
+            user32.GetAsyncKeyState(VK_ESCAPE)
+
             try:
                 while not self._stop_autoclick:
+                    if (user32.GetAsyncKeyState(VK_ESCAPE) & 0x8000) or (
+                        user32.GetAsyncKeyState(VK_ESCAPE) & 0x0001
+                    ):
+                        self._stop_autoclick = True
+                        break
                     elapsed = time.time() - start
                     if elapsed >= run_seconds:
                         break
@@ -3307,14 +3318,19 @@ class MegamuLauncherApp(tk.Tk):
                         save_accounts(self.accounts)
                         last_save_time = time.time()
 
-                    # ngủ theo delay, nhưng vẫn kiểm tra stop / hết giờ
+                    # ngủ theo delay, nhưng vẫn kiểm tra stop / hết giờ / phím ESC
                     end_sleep = time.time() + delay
                     while time.time() < end_sleep:
+                        if (user32.GetAsyncKeyState(VK_ESCAPE) & 0x8000) or (
+                            user32.GetAsyncKeyState(VK_ESCAPE) & 0x0001
+                        ):
+                            self._stop_autoclick = True
+                            break
                         if self._stop_autoclick:
                             break
                         if time.time() - start >= run_seconds:
                             break
-                        time.sleep(0.05)
+                        time.sleep(0.02)
             except Exception as e:
                 err = str(e)
 
@@ -3346,7 +3362,7 @@ class MegamuLauncherApp(tk.Tk):
 
     def _on_ac_tick(self, elapsed, run_seconds, clicks, point_idx, total_points, warn_msg):
         status_txt = (
-            f"Auto Click: {elapsed:.1f}s/{run_seconds:.0f}s | "
+            f"Auto Click (ESC để dừng): {elapsed:.1f}s/{run_seconds:.0f}s | "
             f"click #{clicks} tại điểm {point_idx}/{total_points}"
         )
         if warn_msg:
