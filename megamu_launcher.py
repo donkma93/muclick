@@ -19,6 +19,8 @@ import threading
 import time
 import tkinter as tk
 import winreg
+import cv2
+import numpy as np
 from ctypes import wintypes
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
@@ -535,6 +537,188 @@ def parse_game_window_title(title: str) -> dict:
         "display": "",
         "is_in_game": False,
     }
+
+
+def capture_window_bgr(hwnd):
+    """Chụp ảnh client area của cửa sổ Windows qua GDI (trả về numpy BGR image)."""
+    if not hwnd or not user32.IsWindow(hwnd):
+        return None
+    rect = wintypes.RECT()
+    user32.GetClientRect(hwnd, ctypes.byref(rect))
+    w = rect.right - rect.left
+    h = rect.bottom - rect.top
+    if w <= 0 or h <= 0:
+        return None
+
+    gdi32 = ctypes.windll.gdi32
+    hdc_win = user32.GetDC(hwnd)
+    if not hdc_win:
+        return None
+    hdc_mem = gdi32.CreateCompatibleDC(hdc_win)
+    hbmp = gdi32.CreateCompatibleBitmap(hdc_win, w, h)
+    old_bmp = gdi32.SelectObject(hdc_mem, hbmp)
+
+    res = user32.PrintWindow(hwnd, hdc_mem, 2)
+    if not res:
+        gdi32.BitBlt(hdc_mem, 0, 0, w, h, hdc_win, 0, 0, 0x00CC0020)
+
+    class BITMAPINFOHEADER(ctypes.Structure):
+        _fields_ = [
+            ("biSize", wintypes.DWORD),
+            ("biWidth", wintypes.LONG),
+            ("biHeight", wintypes.LONG),
+            ("biPlanes", wintypes.WORD),
+            ("biBitCount", wintypes.WORD),
+            ("biCompression", wintypes.DWORD),
+            ("biSizeImage", wintypes.DWORD),
+            ("biXPelsPerMeter", wintypes.LONG),
+            ("biYPelsPerMeter", wintypes.LONG),
+            ("biClrUsed", wintypes.DWORD),
+            ("biClrImportant", wintypes.DWORD),
+        ]
+
+    class BITMAPINFO(ctypes.Structure):
+        _fields_ = [("bmiHeader", BITMAPINFOHEADER), ("bmiColors", wintypes.DWORD * 3)]
+
+    bmi = BITMAPINFO()
+    bmi.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+    bmi.bmiHeader.biWidth = w
+    bmi.bmiHeader.biHeight = -h  # top-down
+    bmi.bmiHeader.biPlanes = 1
+    bmi.bmiHeader.biBitCount = 32
+    bmi.bmiHeader.biCompression = 0
+
+    buf = (ctypes.c_ubyte * (w * h * 4))()
+    gdi32.GetDIBits(hdc_mem, hbmp, 0, h, ctypes.byref(buf), ctypes.byref(bmi), 0)
+
+    gdi32.SelectObject(hdc_mem, old_bmp)
+    gdi32.DeleteObject(hbmp)
+    gdi32.DeleteDC(hdc_mem)
+    user32.ReleaseDC(hwnd, hdc_win)
+
+    arr = np.frombuffer(buf, dtype=np.uint8).reshape((h, w, 4))
+    bgr = cv2.cvtColor(arr, cv2.COLOR_BGRA2BGR)
+    return bgr
+
+
+DIGIT_TEMPLATES_10x7 = {
+    "0": np.array([[0,1,1,1,0,0,0],[1,1,0,0,1,0,0],[1,0,0,0,1,1,0],[1,1,0,0,1,1,0],[1,1,0,0,0,1,0],[1,1,0,0,0,1,0],[1,1,0,0,1,1,0],[0,1,0,0,1,1,0],[0,1,0,0,0,1,0],[0,0,1,1,1,0,0]], dtype=np.uint8),
+    "1": np.array([[0,0,0,1,1,1,1],[1,1,1,1,1,1,1],[0,0,0,0,0,1,1],[0,0,0,0,0,1,1],[0,0,0,0,0,1,1],[0,0,0,0,0,1,1],[0,0,0,0,0,1,1],[0,0,0,0,0,1,1],[0,0,0,0,0,1,1],[0,0,0,0,0,1,1]], dtype=np.uint8),
+    "2": np.array([[0,1,1,1,1,0,0],[1,1,0,0,1,1,0],[0,0,0,0,0,1,0],[0,0,0,0,0,1,0],[0,0,0,0,1,1,0],[0,0,0,1,1,0,0],[0,0,1,1,0,0,0],[0,1,1,0,0,0,0],[1,1,0,0,0,0,0],[1,1,1,1,1,1,1]], dtype=np.uint8),
+    "3": np.array([[1,1,1,1,1,1,0],[0,0,0,0,0,1,1],[0,0,0,0,0,0,1],[0,0,0,0,0,1,1],[0,0,1,1,1,1,0],[0,0,1,1,1,1,1],[0,0,0,0,0,0,1],[0,0,0,0,0,0,1],[0,0,0,0,0,0,1],[1,1,1,1,1,1,0]], dtype=np.uint8),
+    "4": np.array([[0,0,0,1,1,0,0],[0,0,1,1,1,0,0],[0,1,1,0,1,0,0],[1,1,0,0,1,0,0],[1,1,0,0,1,0,0],[1,1,1,1,1,1,1],[0,0,0,0,1,0,0],[0,0,0,0,1,0,0],[0,0,0,0,1,0,0],[0,0,0,0,1,0,0]], dtype=np.uint8),
+    "5": np.array([[1,1,1,1,1,1,0],[1,1,0,0,0,0,0],[1,1,1,1,1,0,0],[0,0,0,0,0,1,1],[0,0,0,0,0,0,1],[0,0,0,0,0,0,1],[0,0,0,0,0,1,1],[1,0,0,0,0,1,0],[1,1,0,0,1,1,0],[0,1,1,1,1,0,0]], dtype=np.uint8),
+    "6": np.array([[0,0,1,1,1,0,0],[0,1,1,0,0,0,0],[1,1,0,0,0,0,0],[1,1,1,1,1,0,0],[1,1,0,0,1,1,0],[1,1,0,0,0,1,0],[1,1,0,0,0,1,0],[1,1,0,0,1,1,0],[0,1,1,0,1,1,0],[0,0,1,1,1,0,0]], dtype=np.uint8),
+    "7": np.array([[1,1,1,1,1,1,1],[0,0,0,0,0,1,1],[0,0,0,0,1,1,0],[0,0,0,0,1,0,0],[0,0,0,1,1,0,0],[0,0,0,1,0,0,0],[0,0,1,1,0,0,0],[0,0,1,0,0,0,0],[0,1,1,0,0,0,0],[0,1,0,0,0,0,0]], dtype=np.uint8),
+    "8": np.array([[0,0,1,1,1,0,0],[0,1,1,0,0,1,0],[0,1,0,0,0,1,0],[0,1,0,0,0,1,0],[0,0,1,1,1,0,0],[0,1,1,0,1,1,0],[1,1,0,0,0,1,1],[1,1,0,0,0,1,1],[0,1,0,0,0,1,1],[0,1,1,1,1,1,0]], dtype=np.uint8),
+    "9": np.array([[0,0,1,1,1,0,0],[0,1,0,0,0,1,0],[1,1,0,0,0,1,1],[1,1,0,0,0,1,1],[0,1,0,0,0,1,1],[0,1,1,1,1,1,1],[0,0,0,0,0,1,1],[0,0,0,0,0,1,0],[0,0,0,0,1,1,0],[0,1,1,1,1,0,0]], dtype=np.uint8),
+}
+
+
+def extract_zen_from_image(cv_img):
+    """
+    Bóc tách số Zen từ ảnh chụp cửa sổ game / Hành trang:
+    Kết hợp nhận diện qua Pytesseract (nếu có) và thuật toán đối sánh mẫu 10x7 độc lập.
+    """
+    if cv_img is None:
+        return None
+    h, w = cv_img.shape[:2]
+    if w > 400 and h > 300:
+        crop = cv_img[int(h * 0.4):, int(w * 0.3):]
+    else:
+        crop = cv_img[int(h * 0.80):, :int(w * 0.70)] if h > 100 else cv_img
+
+    ch, cw = crop.shape[:2]
+    if ch <= 0 or cw <= 0:
+        return None
+
+    b, g, r = cv2.split(crop)
+    red_mask = ((r > 80) & (r > g.astype(int) * 1.2) & (r > b.astype(int) * 1.2)).astype(np.uint8) * 255
+
+    # 1. Thử Pytesseract nếu có
+    try:
+        import pytesseract
+        for p in [r"C:\Program Files\Tesseract-OCR\tesseract.exe", r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe", "tesseract"]:
+            if os.path.exists(p) or p == "tesseract":
+                pytesseract.pytesseract.tesseract_cmd = p
+                break
+        inv = 255 - red_mask
+        padded = cv2.copyMakeBorder(inv, 10, 10, 10, 10, cv2.BORDER_CONSTANT, value=255)
+        scaled = cv2.resize(padded, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_CUBIC)
+        txt = pytesseract.image_to_string(scaled, config="--psm 7 -c tessedit_char_whitelist=0123456789.,")
+        clean = re.sub(r"[^\d]", "", txt)
+        if clean and len(clean) >= 3:
+            val = int(clean)
+            if 0 <= val <= 2_000_000_000:
+                return val
+    except Exception:
+        pass
+
+    # 2. Thuật toán Template Matching độc lập
+    try:
+        contours, _ = cv2.findContours(red_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        digit_boxes = []
+        for c in contours:
+            bx, by, bw, bh = cv2.boundingRect(c)
+            if 2 <= bw <= 11 and 6 <= bh <= 15:
+                digit_boxes.append((bx, by, bw, bh))
+        digit_boxes.sort(key=lambda item: item[0])
+
+        if digit_boxes:
+            digits = []
+            for bx, by, bw, bh in digit_boxes:
+                d_crop = red_mask[by:by+bh, bx:bx+bw]
+                norm = cv2.resize(d_crop, (7, 10), interpolation=cv2.INTER_NEAREST)
+                norm_bin = (norm > 128).astype(np.uint8)
+                best_d = "0"
+                best_score = -1
+                for d, tmpl in DIGIT_TEMPLATES_10x7.items():
+                    inter = np.logical_and(norm_bin == 1, tmpl == 1).sum()
+                    union = np.logical_or(norm_bin == 1, tmpl == 1).sum()
+                    score = inter / max(1, union)
+                    if score > best_score:
+                        best_score = score
+                        best_d = d
+                digits.append(best_d)
+            clean = "".join(digits)
+            if clean and len(clean) >= 3:
+                val = int(clean)
+                if 0 <= val <= 2_000_000_000:
+                    return val
+    except Exception:
+        pass
+
+    return None
+
+
+def read_zen_from_game_window(hwnd):
+    """
+    Kích hoạt cửa sổ game, nhấn 'V' mở Hành trang, chụp ảnh đọc Zen, nhấn 'V' đóng lại.
+    Trả về số lượng Zen (int) hoặc None nếu không đọc được.
+    """
+    if not hwnd or not user32.IsWindow(hwnd):
+        return None
+
+    # 1. Focus cửa sổ
+    focus_window(hwnd)
+    time.sleep(0.08)
+
+    # 2. Nhấn 'V' mở Hành Trang
+    release_modifiers()
+    tap_vk(ord("V"), pause=0.12)
+    time.sleep(0.35)
+
+    # 3. Chụp ảnh client
+    img = capture_window_bgr(hwnd)
+
+    # 4. Nhấn 'V' đóng Hành Trang
+    tap_vk(ord("V"), pause=0.08)
+    release_modifiers()
+
+    if img is None:
+        return None
+
+    return extract_zen_from_image(img)
 
 
 def list_game_hwnds():
@@ -2276,6 +2460,24 @@ class MegamuLauncherApp(tk.Tk):
         )
         ttk.Button(bf, text="Lưu file", command=self.acc_save, width=10).pack(side="left")
 
+        bf2 = ttk.Frame(frm)
+        bf2.grid(row=4, column=0, columnspan=7, sticky="w", pady=(6, 0))
+        self.btn_update_all_zen = ttk.Button(
+            bf2,
+            text="💰 Cập nhật Zen từ game (Tất cả cửa sổ)",
+            command=self.on_update_all_zen,
+            width=36,
+        )
+        self.btn_update_all_zen.pack(side="left", padx=(0, 8))
+
+        self.btn_update_sel_zen = ttk.Button(
+            bf2,
+            text="💰 Cập nhật Zen dòng chọn",
+            command=self.on_update_selected_zen,
+            width=26,
+        )
+        self.btn_update_sel_zen.pack(side="left")
+
         ttk.Label(
             frm,
             text=(
@@ -2287,7 +2489,7 @@ class MegamuLauncherApp(tk.Tk):
             ),
             foreground="#555",
             justify="left",
-        ).grid(row=4, column=0, columnspan=7, sticky="w", pady=(10, 0))
+        ).grid(row=5, column=0, columnspan=7, sticky="w", pady=(10, 0))
 
         self._refresh_group_combos()
         self._refresh_acc_tree()
@@ -2411,6 +2613,87 @@ class MegamuLauncherApp(tk.Tk):
         save_account_store(self.account_store)
         self._refresh_group_combos()
         self.status.set(f"Đã lưu {len(self.get_current_accounts())} tài khoản trong [{self.get_current_group()}].")
+
+    def on_update_all_zen(self):
+        """Chạy luồng đọc Zen tự động từ tất cả các cửa sổ game MEGAMU đang mở."""
+        hwnds = list_game_hwnds()
+        if not hwnds:
+            messagebox.showinfo("Thông báo", "Không tìm thấy cửa sổ MEGAMU nào đang chạy.")
+            return
+
+        def _worker():
+            self.set_busy(True, "Đang đọc Zen từ các cửa sổ game...")
+            try:
+                active_accs = self.get_current_accounts()
+                updated_count = 0
+                failed_count = 0
+                for idx, hwnd in enumerate(hwnds):
+                    if idx >= len(active_accs):
+                        break
+                    acc = active_accs[idx]
+                    user_name = acc.get("username", f"Slot {idx + 1}")
+                    self.status.set(f"Đang đọc Zen [{user_name}] (Cửa sổ {idx + 1}/{len(hwnds)})...")
+                    zen_val = read_zen_from_game_window(hwnd)
+                    if zen_val is not None:
+                        acc["zen"] = zen_val
+                        updated_count += 1
+                    else:
+                        failed_count += 1
+                    time.sleep(0.1)
+
+                save_account_store(self.account_store)
+                self.after(0, self._refresh_acc_tree)
+                msg = f"Đã cập nhật Zen: thành công {updated_count} tài khoản."
+                if failed_count > 0:
+                    msg += f" (Không đọc được {failed_count} cửa sổ - hãy đảm bảo nhân vật đã vào game)"
+                self.after(0, lambda: messagebox.showinfo("Cập nhật Zen", msg))
+            except Exception as e:
+                self.after(0, lambda: messagebox.showerror("Lỗi", f"Lỗi khi đọc Zen: {e}"))
+            finally:
+                self.after(0, lambda: self.set_busy(False, "Đã hoàn thành đọc Zen."))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def on_update_selected_zen(self):
+        """Đọc Zen từ cửa sổ game tương ứng với dòng tài khoản được chọn trong danh sách."""
+        sel = self.acc_tree.selection()
+        if not sel:
+            messagebox.showwarning("Chưa chọn", "Vui lòng chọn 1 tài khoản trong danh sách.")
+            return
+        idx = self.acc_tree.index(sel[0])
+        hwnds = list_game_hwnds()
+        if idx >= len(hwnds):
+            messagebox.showwarning(
+                "Không có cửa sổ",
+                f"Tài khoản ở Slot {idx + 1} nhưng hiện tại chỉ có {len(hwnds)} cửa sổ game đang chạy."
+            )
+            return
+
+        hwnd = hwnds[idx]
+        active_accs = self.get_current_accounts()
+        if idx >= len(active_accs):
+            return
+        acc = active_accs[idx]
+        user_name = acc.get("username", f"Slot {idx + 1}")
+
+        def _worker():
+            self.set_busy(True, f"Đang đọc Zen cho [{user_name}]...")
+            try:
+                zen_val = read_zen_from_game_window(hwnd)
+                if zen_val is not None:
+                    acc["zen"] = zen_val
+                    save_account_store(self.account_store)
+                    self.after(0, self._refresh_acc_tree)
+                    self.after(0, lambda: self.zen_var.set(format_zen(zen_val)))
+                    self.after(0, lambda: messagebox.showinfo("Cập nhật Zen", f"Tài khoản [{user_name}]: {format_zen(zen_val)} Zen."))
+                else:
+                    self.after(0, lambda: messagebox.showwarning("Cập nhật Zen", f"Không đọc được Zen từ cửa sổ game của [{user_name}]. Hãy đảm bảo nhân vật đã vào game."))
+            except Exception as e:
+                self.after(0, lambda: messagebox.showerror("Lỗi", f"Lỗi khi đọc Zen: {e}"))
+            finally:
+                self.after(0, lambda: self.set_busy(False, "Sẵn sàng"))
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     # ----- Auto login tab -----
     def _build_auto_tab(self):
@@ -2941,6 +3224,8 @@ class MegamuLauncherApp(tk.Tk):
             "btn_ac_start",
             "btn_ac_refresh",
             "btn_cmd_run",
+            "btn_update_all_zen",
+            "btn_update_sel_zen",
         ):
             btn = getattr(self, attr, None)
             if btn is not None:
