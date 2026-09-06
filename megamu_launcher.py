@@ -80,6 +80,7 @@ VK_TAB = 0x09
 VK_A = 0x41
 VK_V = 0x56
 VK_F8 = 0x77
+VK_F9 = 0x78
 VK_ESCAPE = 0x1B
 VK_BACK = 0x08
 VK_HOME = 0x24
@@ -105,12 +106,19 @@ MEGAMU_PROCESS_NAMES = ("MEGAMU.exe", "Dashboard.exe")
 APP_DIR = install_dir()
 # Dữ liệu user nằm %APPDATA%\MuClick (survive khi update thay exe)
 migrate_user_files(
-    ("accounts.json", "click_coords.json", "autoclick_points.json", "app_settings.json")
+    (
+        "accounts.json",
+        "click_coords.json",
+        "autoclick_points.json",
+        "app_settings.json",
+        "commands.json",
+    )
 )
 ACCOUNTS_FILE = data_path("accounts.json")
 COORDS_FILE = data_path("click_coords.json")
 AUTOCLICK_FILE = data_path("autoclick_points.json")
 SETTINGS_FILE = data_path("app_settings.json")
+COMMANDS_FILE = data_path("commands.json")
 
 
 def load_app_settings() -> dict:
@@ -129,6 +137,57 @@ def save_app_settings(settings: dict):
         cur.update(settings)
         with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
             json.dump(cur, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+DEFAULT_COMMAND_PRESETS = [
+    {"name": "Tự động chấp nhận (PT/Trade)", "cmd": "/re auto"},
+    {"name": "Tự động đánh quái (Attack)", "cmd": "/attack"},
+    {"name": "Tự động nhặt đồ (Pick)", "cmd": "/pick"},
+    {"name": "Tự động nhặt Zen", "cmd": "/pick zen"},
+    {"name": "Ủy thác bán hàng (Offtrade)", "cmd": "/offtrade"},
+    {"name": "Rao bài kênh thế giới", "cmd": "/post "},
+    {"name": "Chuyển rương cá nhân 0", "cmd": "/ware 0"},
+    {"name": "Chuyển rương cá nhân 1", "cmd": "/ware 1"},
+    {"name": "Chuyển rương cá nhân 2", "cmd": "/ware 2"},
+]
+
+
+def default_commands_store() -> dict:
+    return {
+        "commands": [dict(p) for p in DEFAULT_COMMAND_PRESETS],
+        "last_command": "/re auto",
+        "delay_after_enter": 0.10,
+        "delay_after_type": 0.05,
+        "delay_between_windows": 0.15,
+        "type_method": "paste",  # "paste" | "type"
+        "target_mode": "all",   # "all" | "selected_monitors"
+        "loop_enabled": False,
+        "loop_interval": 60.0,
+    }
+
+
+def load_commands_store() -> dict:
+    if os.path.isfile(COMMANDS_FILE):
+        try:
+            with open(COMMANDS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    base = default_commands_store()
+                    base.update(data)
+                    if not isinstance(base.get("commands"), list):
+                        base["commands"] = [dict(p) for p in DEFAULT_COMMAND_PRESETS]
+                    return base
+        except Exception:
+            pass
+    return default_commands_store()
+
+
+def save_commands_store(store: dict):
+    try:
+        with open(COMMANDS_FILE, "w", encoding="utf-8") as f:
+            json.dump(store, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
 
@@ -1477,6 +1536,8 @@ class MegamuLauncherApp(tk.Tk):
         self._ac_pick_armed = False  # chờ nhả chuột trước khi nhận click mới
         self._ac_running = False
         self._stop_autoclick = False
+        self._cmd_running = False
+        self._stop_cmd = False
         self._license_info = lic
 
         self.account_store = load_account_store()
@@ -1489,6 +1550,7 @@ class MegamuLauncherApp(tk.Tk):
         self.accounts = self.get_current_accounts()
         self.coords_store = load_coords_store()
         self.autoclick_store = load_autoclick_store()
+        self.commands_store = load_commands_store()
         self.monitor_vars = {}
         self._monitors = []
         self._monitor_choices_initialized = False
@@ -1500,15 +1562,18 @@ class MegamuLauncherApp(tk.Tk):
         self.tab_accounts = ttk.Frame(nb, padding=10)
         self.tab_auto = ttk.Frame(nb, padding=10)
         self.tab_autoclick = ttk.Frame(nb, padding=10)
+        self.tab_commands = ttk.Frame(nb, padding=10)
         nb.add(self.tab_launch, text="  Mở & Sắp xếp  ")
         nb.add(self.tab_accounts, text="  Tài khoản  ")
         nb.add(self.tab_auto, text="  Auto Login  ")
         nb.add(self.tab_autoclick, text="  Auto Click  ")
+        nb.add(self.tab_commands, text="  Gõ lệnh  ")
 
         self._build_launch_tab()
         self._build_accounts_tab()
         self._build_auto_tab()
         self._build_autoclick_tab()
+        self._build_commands_tab()
 
         # Đồng bộ layout từ store
         self._sync_launch_from_active_layout()
@@ -1529,6 +1594,7 @@ class MegamuLauncherApp(tk.Tk):
 
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.bind("<F8>", self._on_f8)
+        self.bind("<F9>", self._on_f9)
         self.bind("<Escape>", self._on_escape)
 
     # ----- Account group helpers -----
@@ -2608,6 +2674,9 @@ class MegamuLauncherApp(tk.Tk):
             self._do_capture()
 
     def _on_escape(self, _event=None):
+        if getattr(self, "_cmd_running", False):
+            self.on_cmd_stop()
+            return
         if self._ac_running:
             self.on_ac_stop()
             return
@@ -2755,12 +2824,13 @@ class MegamuLauncherApp(tk.Tk):
                 b.configure(state=state)
             except Exception:
                 pass
-        # Auto Click controls (có thể chưa tạo nếu lỗi UI)
+        # Auto Click & Commands controls (có thể chưa tạo nếu lỗi UI)
         for attr in (
             "btn_ac_pick",
             "btn_ac_clear",
             "btn_ac_start",
             "btn_ac_refresh",
+            "btn_cmd_run",
         ):
             btn = getattr(self, attr, None)
             if btn is not None:
@@ -3792,11 +3862,528 @@ class MegamuLauncherApp(tk.Tk):
         self._stop_autoclick = True
         self.status.set("Đang dừng Auto Click...")
 
+    # ----- Commands Tab -----
+    def _persist_commands_settings(self):
+        try:
+            if hasattr(self, "cmd_text_var"):
+                self.commands_store["last_command"] = self.cmd_text_var.get().strip()
+            if hasattr(self, "cmd_delay_enter_var"):
+                self.commands_store["delay_after_enter"] = float(self.cmd_delay_enter_var.get())
+            if hasattr(self, "cmd_delay_win_var"):
+                self.commands_store["delay_between_windows"] = float(self.cmd_delay_win_var.get())
+            if hasattr(self, "cmd_method_var"):
+                self.commands_store["type_method"] = self.cmd_method_var.get()
+            if hasattr(self, "cmd_target_mode_var"):
+                self.commands_store["target_mode"] = self.cmd_target_mode_var.get()
+            if hasattr(self, "cmd_loop_var"):
+                self.commands_store["loop_enabled"] = bool(self.cmd_loop_var.get())
+            if hasattr(self, "cmd_loop_sec_var"):
+                self.commands_store["loop_interval"] = float(self.cmd_loop_sec_var.get())
+            save_commands_store(self.commands_store)
+        except Exception:
+            pass
+
+    def _build_commands_tab(self):
+        frm = self.tab_commands
+
+        ttk.Label(
+            frm,
+            text=(
+                "Tự động chuyển qua từng cửa sổ game MEGAMU → Nhấn Enter → Gõ lệnh yêu cầu → Nhấn Enter gửi."
+            ),
+            wraplength=620,
+            justify="left",
+        ).grid(row=0, column=0, columnspan=4, sticky="w")
+
+        # Frame 1: Lệnh cần thực hiện
+        box_cmd = ttk.LabelFrame(frm, text=" Lệnh thực hiện ", padding=8)
+        box_cmd.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+
+        self.cmd_text_var = tk.StringVar(
+            value=self.commands_store.get("last_command", "/re auto")
+        )
+
+        row1 = ttk.Frame(box_cmd)
+        row1.pack(fill="x", expand=True)
+
+        ttk.Label(row1, text="Chuỗi lệnh:", font=("Segoe UI", 9, "bold")).pack(side="left", padx=(0, 6))
+        self.cmd_entry = ttk.Entry(
+            row1,
+            textvariable=self.cmd_text_var,
+            font=("Segoe UI", 10, "bold"),
+        )
+        self.cmd_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+
+        self.btn_cmd_run = ttk.Button(
+            row1,
+            text="🚀 Gõ lệnh ngay (F9)",
+            width=20,
+            command=self.on_cmd_start,
+        )
+        self.btn_cmd_run.pack(side="left", padx=(0, 6))
+
+        self.btn_cmd_stop = ttk.Button(
+            row1,
+            text="🛑 Dừng (Esc)",
+            width=12,
+            command=self.on_cmd_stop,
+            state="disabled",
+        )
+        self.btn_cmd_stop.pack(side="left")
+
+        # Quick action buttons row
+        quick_row = ttk.Frame(box_cmd)
+        quick_row.pack(fill="x", expand=True, pady=(8, 2))
+
+        ttk.Label(quick_row, text="Lệnh nhanh:").pack(side="left", padx=(0, 6))
+        quick_cmds = [
+            ("/re auto", "/re auto"),
+            ("/attack", "/attack"),
+            ("/pick zen", "/pick zen"),
+            ("/pick", "/pick"),
+            ("/offtrade", "/offtrade"),
+            ("/post", "/post "),
+            ("/ware 0", "/ware 0"),
+            ("/ware 1", "/ware 1"),
+        ]
+        for label, cmd_val in quick_cmds:
+            ttk.Button(
+                quick_row,
+                text=label,
+                width=len(label) + 2,
+                command=lambda c=cmd_val: self.on_cmd_quick(c),
+            ).pack(side="left", padx=(0, 4))
+
+        # Frame 2: Danh sách lệnh mẫu đã lưu
+        box_list = ttk.LabelFrame(frm, text=" Danh sách lệnh mẫu đã lưu ", padding=8)
+        box_list.grid(row=2, column=0, columnspan=4, sticky="nsew", pady=(8, 0))
+
+        tree_frame = ttk.Frame(box_list)
+        tree_frame.pack(fill="both", expand=True)
+
+        self.cmd_tree = ttk.Treeview(
+            tree_frame,
+            columns=("name", "cmd"),
+            show="headings",
+            height=6,
+            selectmode="browse",
+        )
+        self.cmd_tree.heading("name", text="Tên gợi nhớ")
+        self.cmd_tree.heading("cmd", text="Chuỗi lệnh game")
+        self.cmd_tree.column("name", width=220, anchor="w")
+        self.cmd_tree.column("cmd", width=380, anchor="w")
+
+        cmd_scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=self.cmd_tree.yview)
+        self.cmd_tree.configure(yscrollcommand=cmd_scroll.set)
+        self.cmd_tree.pack(side="left", fill="both", expand=True)
+        cmd_scroll.pack(side="right", fill="y")
+
+        self.cmd_tree.bind("<Double-1>", self._on_cmd_tree_double_click)
+        self.cmd_tree.bind("<<TreeviewSelect>>", self._on_cmd_tree_select)
+
+        # Buttons under list
+        tree_btns = ttk.Frame(box_list)
+        tree_btns.pack(fill="x", expand=True, pady=(6, 0))
+
+        ttk.Button(tree_btns, text="➕ Thêm lệnh...", width=14, command=self.on_cmd_add).pack(
+            side="left", padx=(0, 6)
+        )
+        ttk.Button(tree_btns, text="✏️ Sửa...", width=10, command=self.on_cmd_edit).pack(
+            side="left", padx=(0, 6)
+        )
+        ttk.Button(tree_btns, text="🗑️ Xóa", width=10, command=self.on_cmd_delete).pack(
+            side="left", padx=(0, 6)
+        )
+        ttk.Button(tree_btns, text="📋 Chọn lệnh này", width=16, command=self.on_cmd_select_preset).pack(
+            side="left", padx=(0, 6)
+        )
+        ttk.Button(tree_btns, text="⚡ Gõ lệnh này ngay", width=18, command=self.on_cmd_run_selected_preset).pack(
+            side="left"
+        )
+
+        # Frame 3: Cấu hình & Tùy chọn
+        opts = ttk.LabelFrame(frm, text=" Cấu hình & Tùy chọn ", padding=8)
+        opts.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+
+        # Target & method
+        self.cmd_target_mode_var = tk.StringVar(
+            value=self.commands_store.get("target_mode", "all")
+        )
+        self.cmd_method_var = tk.StringVar(
+            value=self.commands_store.get("type_method", "paste")
+        )
+
+        row_opt1 = ttk.Frame(opts)
+        row_opt1.pack(fill="x", expand=True, pady=(0, 4))
+        ttk.Label(row_opt1, text="Mục tiêu:").pack(side="left", padx=(0, 6))
+        ttk.Radiobutton(
+            row_opt1,
+            text="Tất cả cửa sổ MEGAMU đang mở",
+            variable=self.cmd_target_mode_var,
+            value="all",
+            command=self._persist_commands_settings,
+        ).pack(side="left", padx=(0, 12))
+        ttk.Radiobutton(
+            row_opt1,
+            text="Chỉ các màn hình đã chọn (tab Mở & Sắp xếp)",
+            variable=self.cmd_target_mode_var,
+            value="selected_monitors",
+            command=self._persist_commands_settings,
+        ).pack(side="left")
+
+        row_opt2 = ttk.Frame(opts)
+        row_opt2.pack(fill="x", expand=True, pady=(0, 4))
+        ttk.Label(row_opt2, text="Cách nhập:").pack(side="left", padx=(0, 6))
+        ttk.Radiobutton(
+            row_opt2,
+            text="Dán nhanh Clipboard (Khuyên dùng — chuẩn xác 100%, hỗ trợ tiếng Việt)",
+            variable=self.cmd_method_var,
+            value="paste",
+            command=self._persist_commands_settings,
+        ).pack(side="left", padx=(0, 12))
+        ttk.Radiobutton(
+            row_opt2,
+            text="Gõ Scancode (SendInput)",
+            variable=self.cmd_method_var,
+            value="type",
+            command=self._persist_commands_settings,
+        ).pack(side="left")
+
+        # Delays & loop
+        row_opt3 = ttk.Frame(opts)
+        row_opt3.pack(fill="x", expand=True, pady=(2, 0))
+
+        self.cmd_delay_enter_var = tk.DoubleVar(
+            value=float(self.commands_store.get("delay_after_enter", 0.10))
+        )
+        self.cmd_delay_win_var = tk.DoubleVar(
+            value=float(self.commands_store.get("delay_between_windows", 0.15))
+        )
+        self.cmd_loop_var = tk.BooleanVar(
+            value=bool(self.commands_store.get("loop_enabled", False))
+        )
+        self.cmd_loop_sec_var = tk.DoubleVar(
+            value=float(self.commands_store.get("loop_interval", 60.0))
+        )
+
+        ttk.Label(row_opt3, text="Chờ sau khi mở Chat:").pack(side="left", padx=(0, 4))
+        ttk.Spinbox(
+            row_opt3,
+            from_=0.02,
+            to=3.0,
+            increment=0.02,
+            textvariable=self.cmd_delay_enter_var,
+            width=6,
+            command=self._persist_commands_settings,
+        ).pack(side="left", padx=(0, 14))
+
+        ttk.Label(row_opt3, text="Chờ giữa các cửa sổ:").pack(side="left", padx=(0, 4))
+        ttk.Spinbox(
+            row_opt3,
+            from_=0.02,
+            to=5.0,
+            increment=0.05,
+            textvariable=self.cmd_delay_win_var,
+            width=6,
+            command=self._persist_commands_settings,
+        ).pack(side="left", padx=(0, 14))
+
+        ttk.Checkbutton(
+            row_opt3,
+            text="Tự động lặp lại sau",
+            variable=self.cmd_loop_var,
+            command=self._persist_commands_settings,
+        ).pack(side="left", padx=(0, 4))
+        ttk.Spinbox(
+            row_opt3,
+            from_=1.0,
+            to=3600.0,
+            increment=5.0,
+            textvariable=self.cmd_loop_sec_var,
+            width=6,
+            command=self._persist_commands_settings,
+        ).pack(side="left", padx=(0, 4))
+        ttk.Label(row_opt3, text="giây").pack(side="left")
+
+        # Frame 4: Status line & Shortcut info
+        self.cmd_status_var = tk.StringVar(
+            value="Phím tắt: F9 = Gõ lệnh ngay cho tất cả cửa sổ  |  Esc = Dừng khẩn cấp."
+        )
+        ttk.Label(
+            frm,
+            textvariable=self.cmd_status_var,
+            foreground="#055",
+            wraplength=620,
+        ).grid(row=4, column=0, columnspan=4, sticky="w", pady=(8, 0))
+
+        self._refresh_cmd_tree()
+
+    def _refresh_cmd_tree(self):
+        for item in self.cmd_tree.get_children():
+            self.cmd_tree.delete(item)
+        presets = self.commands_store.get("commands", [])
+        for i, p in enumerate(presets):
+            self.cmd_tree.insert(
+                "",
+                "end",
+                iid=str(i),
+                values=(p.get("name", ""), p.get("cmd", "")),
+            )
+
+    def _on_cmd_tree_select(self, _event=None):
+        sel = self.cmd_tree.selection()
+        if not sel:
+            return
+        idx = int(sel[0])
+        presets = self.commands_store.get("commands", [])
+        if 0 <= idx < len(presets):
+            cmd_val = presets[idx].get("cmd", "")
+            if cmd_val:
+                self.cmd_text_var.set(cmd_val)
+
+    def _on_cmd_tree_double_click(self, _event=None):
+        self._on_cmd_tree_select()
+
+    def on_cmd_quick(self, cmd_val: str):
+        self.cmd_text_var.set(cmd_val)
+        self.commands_store["last_command"] = cmd_val
+        self._persist_commands_settings()
+        self.status.set(f"Đã chọn lệnh nhanh: {cmd_val}")
+
+    def on_cmd_select_preset(self):
+        sel = self.cmd_tree.selection()
+        if not sel:
+            messagebox.showinfo("Chọn lệnh", "Vui lòng chọn 1 lệnh từ danh sách phía trên.", parent=self)
+            return
+        idx = int(sel[0])
+        presets = self.commands_store.get("commands", [])
+        if 0 <= idx < len(presets):
+            self.cmd_text_var.set(presets[idx].get("cmd", ""))
+            self.status.set(f"Đã chọn lệnh: {presets[idx].get('name')}")
+
+    def on_cmd_run_selected_preset(self):
+        sel = self.cmd_tree.selection()
+        if not sel:
+            messagebox.showinfo("Chọn lệnh", "Vui lòng chọn 1 lệnh từ danh sách phía trên.", parent=self)
+            return
+        idx = int(sel[0])
+        presets = self.commands_store.get("commands", [])
+        if 0 <= idx < len(presets):
+            cmd_val = presets[idx].get("cmd", "")
+            self.cmd_text_var.set(cmd_val)
+            self.on_cmd_start(cmd_val)
+
+    def on_cmd_add(self):
+        name = simpledialog.askstring("Thêm lệnh mẫu", "Nhập tên gợi nhớ (ví dụ: Party tự động, Rao bán Wing...):", parent=self)
+        if not name or not name.strip():
+            return
+        cmd = simpledialog.askstring("Thêm lệnh mẫu", "Nhập chuỗi lệnh game (ví dụ: /re auto, /post ...):", parent=self)
+        if not cmd or not cmd.strip():
+            return
+        presets = self.commands_store.setdefault("commands", [])
+        presets.append({"name": name.strip(), "cmd": cmd.strip()})
+        save_commands_store(self.commands_store)
+        self._refresh_cmd_tree()
+        self.status.set(f"Đã thêm lệnh mẫu '{name.strip()}': {cmd.strip()}")
+
+    def on_cmd_edit(self):
+        sel = self.cmd_tree.selection()
+        if not sel:
+            messagebox.showinfo("Sửa lệnh", "Vui lòng chọn 1 lệnh trong danh sách để sửa.", parent=self)
+            return
+        idx = int(sel[0])
+        presets = self.commands_store.get("commands", [])
+        if not (0 <= idx < len(presets)):
+            return
+        cur = presets[idx]
+        new_name = simpledialog.askstring(
+            "Sửa lệnh mẫu",
+            "Tên gợi nhớ:",
+            initialvalue=cur.get("name", ""),
+            parent=self,
+        )
+        if new_name is None:
+            return
+        new_cmd = simpledialog.askstring(
+            "Sửa lệnh mẫu",
+            "Chuỗi lệnh game:",
+            initialvalue=cur.get("cmd", ""),
+            parent=self,
+        )
+        if new_cmd is None:
+            return
+        cur["name"] = new_name.strip()
+        cur["cmd"] = new_cmd.strip()
+        save_commands_store(self.commands_store)
+        self._refresh_cmd_tree()
+        self.status.set(f"Đã cập nhật lệnh: '{cur['name']}' → {cur['cmd']}")
+
+    def on_cmd_delete(self):
+        sel = self.cmd_tree.selection()
+        if not sel:
+            messagebox.showinfo("Xóa lệnh", "Vui lòng chọn 1 lệnh trong danh sách để xóa.", parent=self)
+            return
+        idx = int(sel[0])
+        presets = self.commands_store.get("commands", [])
+        if not (0 <= idx < len(presets)):
+            return
+        cur = presets[idx]
+        if not messagebox.askyesno("Xác nhận xóa", f"Bạn có chắc muốn xóa lệnh '{cur.get('name')}' ({cur.get('cmd')})?", parent=self):
+            return
+        presets.pop(idx)
+        save_commands_store(self.commands_store)
+        self._refresh_cmd_tree()
+        self.status.set(f"Đã xóa lệnh '{cur.get('name')}'.")
+
+    def _on_f9(self, _event=None):
+        if not self._busy and not getattr(self, "_cmd_running", False):
+            self.on_cmd_start()
+
+    def on_cmd_start(self, custom_cmd=None):
+        if getattr(self, "_cmd_running", False):
+            return
+        cmd = (custom_cmd if custom_cmd is not None else self.cmd_text_var.get()).strip()
+        if not cmd:
+            messagebox.showwarning("Chưa nhập lệnh", "Vui lòng nhập lệnh cần gõ (ví dụ: /re auto).", parent=self)
+            return
+
+        target_mode = self.cmd_target_mode_var.get()
+        if target_mode == "selected_monitors":
+            hwnds = self._ac_game_hwnds()
+        else:
+            hwnds = list_game_hwnds()
+
+        if not hwnds:
+            msg = "Không tìm thấy cửa sổ game MEGAMU nào đang mở!"
+            messagebox.showinfo("Thông báo", msg, parent=self)
+            self.status.set(msg)
+            return
+
+        self.commands_store["last_command"] = cmd
+        self._persist_commands_settings()
+
+        self._cmd_running = True
+        self._stop_cmd = False
+        self.btn_cmd_run.configure(state="disabled")
+        self.btn_cmd_stop.configure(state="normal")
+        self.set_busy(True, f"Bắt đầu gõ lệnh '{cmd}' trên {len(hwnds)} cửa sổ...")
+
+        def worker():
+            loop = bool(self.cmd_loop_var.get())
+            loop_interval = max(1.0, float(self.cmd_loop_sec_var.get()))
+            delay_enter = max(0.02, float(self.cmd_delay_enter_var.get()))
+            delay_win = max(0.02, float(self.cmd_delay_win_var.get()))
+            method = self.cmd_method_var.get()
+
+            iteration = 0
+            total_typed = 0
+            err = None
+
+            try:
+                while not self._stop_cmd:
+                    iteration += 1
+                    if target_mode == "selected_monitors":
+                        cur_hwnds = self._ac_game_hwnds()
+                    else:
+                        cur_hwnds = list_game_hwnds()
+
+                    if not cur_hwnds:
+                        break
+
+                    for idx, hwnd in enumerate(cur_hwnds):
+                        if self._stop_cmd or (user32.GetAsyncKeyState(VK_ESCAPE) & 0x8000) or (user32.GetAsyncKeyState(VK_ESCAPE) & 0x0001):
+                            self._stop_cmd = True
+                            break
+
+                        if not user32.IsWindow(hwnd):
+                            continue
+
+                        title = get_window_text(hwnd) or f"MEGAMU {idx + 1}"
+                        self.after(
+                            0,
+                            lambda i=idx + 1, n=len(cur_hwnds), t=title, c=cmd: self._on_cmd_tick(
+                                i, n, t, c
+                            ),
+                        )
+
+                        # 1. Ép cửa sổ lên foreground
+                        focus_window(hwnd)
+                        time.sleep(0.08)
+
+                        # 2. Nhấn Enter mở thanh chat
+                        release_modifiers()
+                        tap_vk(VK_RETURN, pause=delay_enter)
+
+                        # 3. Gõ hoặc dán nội dung lệnh
+                        if method == "type":
+                            type_text_scancode(cmd)
+                        else:
+                            paste_text(cmd, settle=0.04)
+                        time.sleep(0.04)
+
+                        # 4. Nhấn Enter gửi lệnh
+                        tap_vk(VK_RETURN, pause=0.05)
+                        release_modifiers()
+
+                        total_typed += 1
+                        if idx < len(cur_hwnds) - 1 and delay_win > 0:
+                            time.sleep(delay_win)
+
+                    if not loop or self._stop_cmd:
+                        break
+
+                    loop_end = time.time() + loop_interval
+                    while time.time() < loop_end and not self._stop_cmd:
+                        if (user32.GetAsyncKeyState(VK_ESCAPE) & 0x8000) or (
+                            user32.GetAsyncKeyState(VK_ESCAPE) & 0x0001
+                        ):
+                            self._stop_cmd = True
+                            break
+                        rem = max(0.0, loop_end - time.time())
+                        self.after(
+                            0,
+                            lambda r=rem, c=cmd: self.cmd_status_var.set(
+                                f"Đang chờ {r:.1f}s để lặp lại lệnh '{c}' (Esc để dừng)..."
+                            ),
+                        )
+                        time.sleep(0.1)
+
+            except Exception as e:
+                err = str(e)
+
+            def done():
+                self._cmd_running = False
+                self.btn_cmd_run.configure(state="normal")
+                self.btn_cmd_stop.configure(state="disabled")
+                self.set_busy(False)
+                if self._stop_cmd:
+                    msg = f"Đã dừng gõ lệnh. Đã thực hiện {total_typed} lượt."
+                elif err:
+                    msg = f"Gõ lệnh lỗi: {err} (đã gõ {total_typed} lượt)."
+                else:
+                    msg = f"Đã gõ lệnh '{cmd}' thành công trên {total_typed} cửa sổ."
+                self.status.set(msg)
+                self.cmd_status_var.set(msg)
+
+            self.after(0, done)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_cmd_tick(self, current, total, title, cmd):
+        status_txt = f"Đang gõ lệnh [{current}/{total}] '{cmd}' → {title} (Esc để dừng)"
+        self.status.set(status_txt)
+        self.cmd_status_var.set(status_txt)
+
+    def on_cmd_stop(self):
+        self._stop_cmd = True
+        self.status.set("Đang dừng gõ lệnh...")
+
     def on_close(self):
         self._capture_target = None
         self._wizard_queue = []
         self._stop_login = True
         self._stop_autoclick = True
+        self._stop_cmd = True
         if self._ac_picking:
             self._ac_picking = False
         if self._ac_pick_job:
@@ -3806,6 +4393,10 @@ class MegamuLauncherApp(tk.Tk):
                 pass
         try:
             self._persist_ac_timing()
+        except Exception:
+            pass
+        try:
+            self._persist_commands_settings()
         except Exception:
             pass
         self.destroy()
