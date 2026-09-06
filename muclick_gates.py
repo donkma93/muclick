@@ -120,14 +120,14 @@ def run_update_gate(root: tk.Tk) -> bool:
         st = info.get("status")
         if st == "ok":
             status.set("Đã ở phiên bản mới nhất.")
-            detail.set(f"Local {info.get('local')}  |  Remote {info.get('remote')}")
+            detail.set(f"Phiên bản: {info.get('local')}")
             progress.set(100)
             result["ok"] = True
             dlg.after(250, dlg.destroy)
             return
         if st == "bootstrap":
             status.set("Chưa có Release trên GitHub — cho phép chạy bản đầu.")
-            detail.set(f"Local {info.get('local')}")
+            detail.set(f"Phiên bản: {info.get('local')}")
             progress.set(100)
             result["ok"] = True
             dlg.after(400, dlg.destroy)
@@ -136,8 +136,7 @@ def run_update_gate(root: tk.Tk) -> bool:
         state["release"] = rel
         status.set("Bắt buộc cập nhật trước khi sử dụng.")
         detail.set(
-            f"{info['local']}  →  {rel['version']} ({rel.get('tag')})\n"
-            f"Asset: {rel.get('asset_name')}"
+            f"Phiên bản: {info['local']}  →  {rel['version']} ({rel.get('tag')})"
         )
         progress.set(0)
         show_buttons(btn_update, btn_exit)
@@ -162,10 +161,13 @@ def run_update_gate(root: tk.Tk) -> bool:
                     done, total = payload
                     pct = (done * 100.0 / total) if total else 0
                     progress.set(pct)
-                    status.set(
-                        f"Đang tải... {done // 1024} KB"
-                        + (f" / {total // 1024} KB" if total else "")
-                    )
+                    status.set(f"Đang tải bản cập nhật ({pct:.0f}%)...")
+                    if total > 0:
+                        done_mb = done / (1024 * 1024)
+                        total_mb = total / (1024 * 1024)
+                        detail.set(f"{done_mb:.1f} MB / {total_mb:.1f} MB ({pct:.1f}%)")
+                    else:
+                        detail.set(f"{done // 1024:,} KB")
                 elif kind == "update_err":
                     on_update_err(payload)
         except queue.Empty:
@@ -197,8 +199,9 @@ def run_update_gate(root: tk.Tk) -> bool:
         if not rel or state["busy"]:
             return
         state["busy"] = True
-        status.set(f"Đang tải {rel['asset_name']}...")
-        detail.set(rel["download_url"])
+        status.set(f"Đang tải bản cập nhật {rel.get('tag')}...")
+        detail.set("Đang chuẩn bị tải...")
+        progress.set(0)
         show_buttons(btn_exit)
 
         def progress_cb(done, total):
