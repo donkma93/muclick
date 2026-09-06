@@ -540,7 +540,9 @@ def parse_game_window_title(title: str) -> dict:
 
 
 def capture_window_bgr(hwnd):
-    """Chụp ảnh client area của cửa sổ Windows qua GDI (trả về numpy BGR image)."""
+    """
+    Chụp ảnh client area của cửa sổ game từ Desktop DC (đảm bảo 100% không bị đen do GPU/DirectX).
+    """
     if not hwnd or not user32.IsWindow(hwnd):
         return None
     rect = wintypes.RECT()
@@ -550,17 +552,19 @@ def capture_window_bgr(hwnd):
     if w <= 0 or h <= 0:
         return None
 
-    gdi32 = ctypes.windll.gdi32
-    hdc_win = user32.GetDC(hwnd)
-    if not hdc_win:
+    pt = wintypes.POINT(0, 0)
+    user32.ClientToScreen(hwnd, ctypes.byref(pt))
+    sx, sy = pt.x, pt.y
+
+    hdc_screen = user32.GetDC(0)
+    if not hdc_screen:
         return None
-    hdc_mem = gdi32.CreateCompatibleDC(hdc_win)
-    hbmp = gdi32.CreateCompatibleBitmap(hdc_win, w, h)
+    gdi32 = ctypes.windll.gdi32
+    hdc_mem = gdi32.CreateCompatibleDC(hdc_screen)
+    hbmp = gdi32.CreateCompatibleBitmap(hdc_screen, w, h)
     old_bmp = gdi32.SelectObject(hdc_mem, hbmp)
 
-    res = user32.PrintWindow(hwnd, hdc_mem, 2)
-    if not res:
-        gdi32.BitBlt(hdc_mem, 0, 0, w, h, hdc_win, 0, 0, 0x00CC0020)
+    gdi32.BitBlt(hdc_mem, 0, 0, w, h, hdc_screen, sx, sy, 0x00CC0020)
 
     class BITMAPINFOHEADER(ctypes.Structure):
         _fields_ = [
@@ -594,131 +598,217 @@ def capture_window_bgr(hwnd):
     gdi32.SelectObject(hdc_mem, old_bmp)
     gdi32.DeleteObject(hbmp)
     gdi32.DeleteDC(hdc_mem)
-    user32.ReleaseDC(hwnd, hdc_win)
+    user32.ReleaseDC(0, hdc_screen)
 
     arr = np.frombuffer(buf, dtype=np.uint8).reshape((h, w, 4))
     bgr = cv2.cvtColor(arr, cv2.COLOR_BGRA2BGR)
     return bgr
 
 
-DIGIT_TEMPLATES_10x7 = {
-    "0": np.array([[0,1,1,1,0,0,0],[1,1,0,0,1,0,0],[1,0,0,0,1,1,0],[1,1,0,0,1,1,0],[1,1,0,0,0,1,0],[1,1,0,0,0,1,0],[1,1,0,0,1,1,0],[0,1,0,0,1,1,0],[0,1,0,0,0,1,0],[0,0,1,1,1,0,0]], dtype=np.uint8),
-    "1": np.array([[0,0,0,1,1,1,1],[1,1,1,1,1,1,1],[0,0,0,0,0,1,1],[0,0,0,0,0,1,1],[0,0,0,0,0,1,1],[0,0,0,0,0,1,1],[0,0,0,0,0,1,1],[0,0,0,0,0,1,1],[0,0,0,0,0,1,1],[0,0,0,0,0,1,1]], dtype=np.uint8),
-    "2": np.array([[0,1,1,1,1,0,0],[1,1,0,0,1,1,0],[0,0,0,0,0,1,0],[0,0,0,0,0,1,0],[0,0,0,0,1,1,0],[0,0,0,1,1,0,0],[0,0,1,1,0,0,0],[0,1,1,0,0,0,0],[1,1,0,0,0,0,0],[1,1,1,1,1,1,1]], dtype=np.uint8),
-    "3": np.array([[1,1,1,1,1,1,0],[0,0,0,0,0,1,1],[0,0,0,0,0,0,1],[0,0,0,0,0,1,1],[0,0,1,1,1,1,0],[0,0,1,1,1,1,1],[0,0,0,0,0,0,1],[0,0,0,0,0,0,1],[0,0,0,0,0,0,1],[1,1,1,1,1,1,0]], dtype=np.uint8),
-    "4": np.array([[0,0,0,1,1,0,0],[0,0,1,1,1,0,0],[0,1,1,0,1,0,0],[1,1,0,0,1,0,0],[1,1,0,0,1,0,0],[1,1,1,1,1,1,1],[0,0,0,0,1,0,0],[0,0,0,0,1,0,0],[0,0,0,0,1,0,0],[0,0,0,0,1,0,0]], dtype=np.uint8),
-    "5": np.array([[1,1,1,1,1,1,0],[1,1,0,0,0,0,0],[1,1,1,1,1,0,0],[0,0,0,0,0,1,1],[0,0,0,0,0,0,1],[0,0,0,0,0,0,1],[0,0,0,0,0,1,1],[1,0,0,0,0,1,0],[1,1,0,0,1,1,0],[0,1,1,1,1,0,0]], dtype=np.uint8),
-    "6": np.array([[0,0,1,1,1,0,0],[0,1,1,0,0,0,0],[1,1,0,0,0,0,0],[1,1,1,1,1,0,0],[1,1,0,0,1,1,0],[1,1,0,0,0,1,0],[1,1,0,0,0,1,0],[1,1,0,0,1,1,0],[0,1,1,0,1,1,0],[0,0,1,1,1,0,0]], dtype=np.uint8),
-    "7": np.array([[1,1,1,1,1,1,1],[0,0,0,0,0,1,1],[0,0,0,0,1,1,0],[0,0,0,0,1,0,0],[0,0,0,1,1,0,0],[0,0,0,1,0,0,0],[0,0,1,1,0,0,0],[0,0,1,0,0,0,0],[0,1,1,0,0,0,0],[0,1,0,0,0,0,0]], dtype=np.uint8),
-    "8": np.array([[0,0,1,1,1,0,0],[0,1,1,0,0,1,0],[0,1,0,0,0,1,0],[0,1,0,0,0,1,0],[0,0,1,1,1,0,0],[0,1,1,0,1,1,0],[1,1,0,0,0,1,1],[1,1,0,0,0,1,1],[0,1,0,0,0,1,1],[0,1,1,1,1,1,0]], dtype=np.uint8),
-    "9": np.array([[0,0,1,1,1,0,0],[0,1,0,0,0,1,0],[1,1,0,0,0,1,1],[1,1,0,0,0,1,1],[0,1,0,0,0,1,1],[0,1,1,1,1,1,1],[0,0,0,0,0,1,1],[0,0,0,0,0,1,0],[0,0,0,0,1,1,0],[0,1,1,1,1,0,0]], dtype=np.uint8),
+TEMPLATES_7x10 = {
+    "0": [
+        np.array([[0,0,1,1,1,1,0],[0,1,1,0,0,1,0],[0,1,0,0,0,1,1],[1,1,0,0,0,1,1],[1,1,0,0,0,1,1],[1,1,0,0,0,1,1],[1,1,0,0,0,1,1],[1,1,0,0,0,1,1],[0,1,1,0,0,1,0],[0,0,1,1,1,1,0]], dtype=np.uint8),
+        np.array([[0,1,1,1,1,1,0],[1,1,1,1,1,1,1],[1,1,0,0,0,1,1],[1,1,0,0,0,1,1],[1,1,0,0,0,1,1],[1,1,0,0,0,1,1],[1,1,0,0,0,1,1],[1,1,0,0,0,1,1],[1,1,1,1,1,1,1],[0,1,1,1,1,1,0]], dtype=np.uint8),
+        np.array([[0,1,1,1,1,1,0],[1,1,1,1,1,1,0],[1,1,1,0,1,1,0],[1,1,0,0,1,1,1],[1,1,0,0,1,1,1],[1,1,0,0,1,1,1],[1,1,0,0,1,1,1],[1,1,1,1,1,1,0],[1,1,1,1,1,1,0],[0,1,1,1,1,1,0]], dtype=np.uint8),
+    ],
+    "1": [
+        np.array([[0,0,0,0,1,1,1],[1,1,1,1,1,1,1],[0,0,0,0,0,0,1],[0,0,0,0,1,1,1],[0,0,0,0,1,1,1],[0,0,0,0,1,1,1],[0,0,0,0,1,1,1],[0,0,0,0,1,1,1],[0,0,0,0,1,1,1],[0,0,0,0,1,1,1]], dtype=np.uint8),
+        np.array([[1,1,1,1,1,1,1],[1,1,1,1,1,1,1],[0,0,0,1,1,1,1],[0,0,0,1,1,1,1],[0,0,0,1,1,1,1],[0,0,0,1,1,1,1],[0,0,0,1,1,1,1],[0,0,0,1,1,1,1],[0,0,0,1,1,1,1],[0,0,0,1,1,1,1]], dtype=np.uint8),
+        np.array([[1,1,1,1,1,1,1],[1,1,1,1,1,1,1],[1,1,1,1,1,1,1],[0,0,0,1,1,1,1],[0,0,0,1,1,1,1],[0,0,0,1,1,1,1],[0,0,0,1,1,1,1],[0,0,0,1,1,1,1],[0,0,0,1,1,1,1],[0,0,0,1,1,1,1]], dtype=np.uint8),
+    ],
+    "2": [
+        np.array([[0,1,1,1,1,0,0],[0,1,0,0,1,1,0],[0,0,0,0,0,1,0],[0,0,0,0,0,1,0],[0,0,0,0,1,1,0],[0,0,0,1,1,0,0],[0,0,1,1,0,0,0],[0,1,1,0,0,0,0],[1,1,0,0,0,0,0],[1,1,1,1,1,1,1]], dtype=np.uint8),
+        np.array([[0,0,0,0,1,1,0],[0,0,0,0,0,1,1],[0,0,0,0,0,1,1],[0,0,0,0,0,1,1],[0,0,0,0,1,1,0],[0,0,0,1,1,0,0],[1,1,1,0,0,0,0],[1,1,1,0,0,0,0],[1,1,1,0,0,0,0],[1,1,1,1,1,1,1]], dtype=np.uint8),
+        np.array([[1,1,1,1,1,1,0],[1,1,1,1,1,1,1],[0,0,0,0,0,1,1],[0,0,0,0,1,1,1],[0,0,1,1,1,1,0],[0,1,1,1,0,0,0],[1,1,1,0,0,0,0],[1,1,0,0,0,0,0],[1,1,1,1,1,1,1],[1,1,1,1,1,1,1]], dtype=np.uint8),
+    ],
+    "3": [
+        np.array([[1,1,1,1,1,1,0],[0,0,0,0,0,1,1],[0,0,0,0,0,0,1],[0,0,0,0,0,1,1],[0,0,1,1,1,1,0],[0,0,1,1,1,1,1],[0,0,0,0,0,0,1],[0,0,0,0,0,0,1],[0,0,0,0,0,1,1],[1,1,1,1,1,1,0]], dtype=np.uint8),
+        np.array([[1,1,1,1,1,1,1],[1,1,1,1,1,1,1],[0,0,0,0,1,1,1],[1,1,1,1,1,1,1],[1,1,1,1,1,1,1],[1,1,1,1,1,1,1],[0,0,0,0,1,1,1],[1,1,1,1,1,1,1],[1,1,1,1,1,1,1],[1,1,1,1,1,0,0]], dtype=np.uint8),
+    ],
+    "4": [
+        np.array([[0,0,0,0,1,1,0],[0,0,0,1,1,1,0],[0,0,1,1,0,1,0],[0,1,1,0,0,1,0],[1,1,0,0,0,1,0],[1,1,1,1,1,1,1],[0,0,0,0,0,1,0],[0,0,0,0,0,1,0],[0,0,0,0,0,1,0],[0,0,0,0,0,1,0]], dtype=np.uint8),
+        np.array([[0,0,0,1,1,1,0],[0,0,0,1,1,1,0],[0,0,1,1,1,1,0],[0,1,1,1,1,1,0],[1,1,1,1,1,1,0],[1,1,1,1,1,1,0],[1,1,1,1,1,1,0],[1,1,1,1,1,1,1],[1,1,1,1,1,1,1],[0,0,0,0,1,1,0]], dtype=np.uint8),
+        np.array([[0,0,0,1,1,1,1],[0,0,0,1,1,1,1],[0,0,0,1,1,1,1],[0,1,1,1,1,1,1],[1,1,1,1,1,1,1],[1,1,1,1,1,1,1],[1,1,1,1,1,1,1],[1,1,0,0,0,1,1],[1,1,0,0,0,1,1],[0,0,0,0,0,1,1]], dtype=np.uint8),
+    ],
+    "5": [
+        np.array([[1,1,1,1,1,1,0],[1,1,0,0,0,0,0],[1,1,1,1,1,0,0],[0,0,0,0,0,1,1],[0,0,0,0,0,0,1],[0,0,0,0,0,0,1],[0,0,0,0,0,1,1],[1,0,0,0,0,1,0],[1,1,0,0,1,1,0],[0,1,1,1,1,0,0]], dtype=np.uint8),
+        np.array([[1,1,1,1,0,0,0],[1,1,1,0,0,0,0],[1,1,1,0,0,0,0],[1,1,1,1,0,0,0],[1,1,1,1,1,1,1],[0,0,0,0,0,1,1],[0,0,0,0,0,1,1],[0,0,0,0,1,1,1],[0,0,0,1,1,1,1],[1,1,1,1,1,1,0]], dtype=np.uint8),
+        np.array([[1,1,1,1,1,1,1],[1,1,1,1,1,1,1],[1,1,1,0,0,0,0],[1,1,1,1,1,0,0],[1,1,1,1,1,1,1],[1,1,1,1,1,1,1],[0,0,0,0,1,1,1],[1,1,1,1,1,1,1],[1,1,1,1,1,1,1],[1,1,1,1,1,0,0]], dtype=np.uint8),
+    ],
+    "6": [
+        np.array([[0,0,1,1,1,0,0],[0,1,1,0,0,0,0],[1,1,0,0,0,0,0],[1,1,1,1,1,0,0],[1,1,0,0,1,1,0],[1,1,0,0,0,1,0],[1,1,0,0,0,1,0],[1,1,0,0,1,1,0],[0,1,1,0,1,1,0],[0,0,1,1,1,0,0]], dtype=np.uint8),
+    ],
+    "7": [
+        np.array([[1,1,1,1,1,1,1],[0,0,0,0,0,1,1],[0,0,0,0,1,1,0],[0,0,0,0,1,0,0],[0,0,0,1,1,0,0],[0,0,0,1,0,0,0],[0,0,1,1,0,0,0],[0,0,1,0,0,0,0],[0,1,1,0,0,0,0],[0,1,0,0,0,0,0]], dtype=np.uint8),
+        np.array([[0,0,1,1,1,0,0],[0,0,1,1,1,1,1],[0,0,0,1,1,1,1],[0,0,0,0,1,1,1],[0,0,1,1,1,0,0],[0,0,1,1,1,0,0],[1,1,1,0,0,0,0],[1,1,1,0,0,0,0],[1,1,1,0,0,0,0],[1,1,1,0,0,0,0]], dtype=np.uint8),
+    ],
+    "8": [
+        np.array([[0,0,1,1,1,0,0],[0,1,1,0,0,1,0],[0,1,0,0,0,1,0],[0,1,1,0,0,1,0],[0,0,1,1,1,1,0],[0,1,1,0,1,1,0],[1,1,0,0,0,1,1],[1,1,0,0,0,1,1],[0,1,0,0,0,1,1],[0,1,1,1,1,1,0]], dtype=np.uint8),
+    ],
+    "9": [
+        np.array([[0,0,1,1,1,0,0],[0,1,1,0,1,1,0],[1,1,0,0,0,1,1],[1,1,0,0,0,1,1],[1,1,0,0,0,1,1],[0,1,1,1,1,1,1],[0,0,0,0,0,1,1],[0,0,0,0,0,1,0],[0,0,0,0,1,1,0],[0,1,1,1,1,0,0]], dtype=np.uint8),
+        np.array([[1,1,1,0,1,1,0],[1,1,0,0,1,1,0],[1,1,0,0,1,1,1],[1,1,0,0,1,1,1],[1,1,0,1,1,1,1],[0,0,0,1,1,1,1],[0,0,0,0,1,1,0],[0,0,0,1,1,1,0],[0,0,1,1,1,1,0],[1,1,1,1,0,0,0]], dtype=np.uint8),
+        np.array([[0,1,1,1,1,1,0],[1,1,1,1,1,1,0],[1,1,1,0,1,1,0],[1,1,1,0,1,1,1],[1,1,1,1,1,1,1],[0,1,1,1,1,1,1],[0,0,1,1,1,1,0],[0,1,1,1,1,1,0],[0,1,1,1,1,0,0],[0,1,1,1,0,0,0]], dtype=np.uint8),
+    ],
 }
+
+
+def _match_mu_digit(d_crop):
+    grid = cv2.resize(d_crop, (7, 10), interpolation=cv2.INTER_LINEAR)
+    norm_bin = (grid > 80).astype(np.uint8)
+    best_d = "0"
+    best_score = -1.0
+    for d, tmpl_list in TEMPLATES_7x10.items():
+        for tmpl in tmpl_list:
+            inter = np.logical_and(norm_bin == 1, tmpl == 1).sum()
+            union = np.logical_or(norm_bin == 1, tmpl == 1).sum()
+            score = inter / max(1, union)
+            if score > best_score:
+                best_score = score
+                best_d = d
+    return best_d, best_score
 
 
 def extract_zen_from_image(cv_img):
     """
     Bóc tách số Zen từ ảnh chụp cửa sổ game / Hành trang:
-    Kết hợp nhận diện qua Pytesseract (nếu có) và thuật toán đối sánh mẫu 10x7 độc lập.
+    Sử dụng multi-threshold thích ứng, phân cụm chữ số đỏ và multi-template matching.
+    Hỗ trợ mọi độ phân giải, độ tương phản và layout (kể cả lưới 4x3, 4x4 thu nhỏ).
     """
     if cv_img is None:
         return None
-    h, w = cv_img.shape[:2]
-    if w > 400 and h > 300:
-        crop = cv_img[int(h * 0.4):, int(w * 0.3):]
-    else:
-        crop = cv_img[int(h * 0.80):, :int(w * 0.70)] if h > 100 else cv_img
 
-    ch, cw = crop.shape[:2]
-    if ch <= 0 or cw <= 0:
-        return None
+    h, w = cv_img.shape[:2]
+    # Lấy vùng chứa thanh Zen hành trang (nửa dưới và bên phải của cửa sổ)
+    if w >= 400 and h >= 250:
+        crop = cv_img[int(h * 0.40):, int(w * 0.20):]
+    else:
+        crop = cv_img[int(h * 0.40):, :] if h > 100 else cv_img
 
     b, g, r = cv2.split(crop)
-    red_mask = ((r > 80) & (r > g.astype(int) * 1.2) & (r > b.astype(int) * 1.2)).astype(np.uint8) * 255
 
-    # 1. Thử Pytesseract nếu có
-    try:
-        import pytesseract
-        for p in [r"C:\Program Files\Tesseract-OCR\tesseract.exe", r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe", "tesseract"]:
-            if os.path.exists(p) or p == "tesseract":
-                pytesseract.pytesseract.tesseract_cmd = p
-                break
-        inv = 255 - red_mask
-        padded = cv2.copyMakeBorder(inv, 10, 10, 10, 10, cv2.BORDER_CONSTANT, value=255)
-        scaled = cv2.resize(padded, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_CUBIC)
-        txt = pytesseract.image_to_string(scaled, config="--psm 7 -c tessedit_char_whitelist=0123456789.,")
-        clean = re.sub(r"[^\d]", "", txt)
-        if clean and len(clean) >= 3:
-            val = int(clean)
-            if 0 <= val <= 2_000_000_000:
-                return val
-    except Exception:
-        pass
+    all_threshold_candidates = []
 
-    # 2. Thuật toán Template Matching độc lập
-    try:
+    # Quét qua các ngưỡng độ tương phản màu đỏ (từ sáng đến tối)
+    for r_th in [80, 65, 55]:
+        if r_th == 80:
+            red_mask = ((r > 80) & (r > g.astype(int) * 1.2) & (r > b.astype(int) * 1.2)).astype(np.uint8) * 255
+        else:
+            red_mask = ((r >= r_th) & (r > g.astype(int) + 10) & (r > b.astype(int) + 10) & (g <= 70)).astype(np.uint8) * 255
+
         contours, _ = cv2.findContours(red_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        digit_boxes = []
+        boxes = []
         for c in contours:
             bx, by, bw, bh = cv2.boundingRect(c)
-            if 2 <= bw <= 11 and 6 <= bh <= 15:
-                digit_boxes.append((bx, by, bw, bh))
-        digit_boxes.sort(key=lambda item: item[0])
+            # Chỉ lấy các chữ số: chiều rộng 1..7px, chiều cao 5..13px
+            if 1 <= bw <= 7 and 5 <= bh <= 13:
+                boxes.append((bx, by, bw, bh))
 
-        if digit_boxes:
-            digits = []
-            for bx, by, bw, bh in digit_boxes:
-                d_crop = red_mask[by:by+bh, bx:bx+bw]
-                norm = cv2.resize(d_crop, (7, 10), interpolation=cv2.INTER_NEAREST)
-                norm_bin = (norm > 128).astype(np.uint8)
-                best_d = "0"
-                best_score = -1
-                for d, tmpl in DIGIT_TEMPLATES_10x7.items():
-                    inter = np.logical_and(norm_bin == 1, tmpl == 1).sum()
-                    union = np.logical_or(norm_bin == 1, tmpl == 1).sum()
-                    score = inter / max(1, union)
-                    if score > best_score:
-                        best_score = score
-                        best_d = d
-                digits.append(best_d)
-            clean = "".join(digits)
-            if clean and len(clean) >= 3:
-                val = int(clean)
-                if 0 <= val <= 2_000_000_000:
-                    return val
-    except Exception:
-        pass
+        if not boxes:
+            continue
 
-    return None
+        # Gom nhóm các chữ số cùng nằm trên một hàng ngang (cách nhau không quá 3px theo trục Y)
+        lines = []
+        boxes.sort(key=lambda b: (b[1], b[0]))
+        for box in boxes:
+            placed = False
+            for line in lines:
+                avg_y = sum(b[1] for b in line) / len(line)
+                if abs(box[1] - avg_y) <= 3:
+                    line.append(box)
+                    placed = True
+                    break
+            if not placed:
+                lines.append([box])
+
+        for line in lines:
+            line.sort(key=lambda b: b[0])
+            # Cụm các chữ số liền kề trên dòng (khoảng cách giữa 2 chữ số <= 16px)
+            clusters = []
+            cur_cluster = [line[0]]
+            for i in range(1, len(line)):
+                prev = cur_cluster[-1]
+                gap = line[i][0] - (prev[0] + prev[2])
+                if gap <= 16:
+                    cur_cluster.append(line[i])
+                else:
+                    clusters.append(cur_cluster)
+                    cur_cluster = [line[i]]
+            clusters.append(cur_cluster)
+
+            for cluster in clusters:
+                # Zen trong MU luôn có từ 3 chữ số trở lên (thường là 7..10 chữ số)
+                if len(cluster) >= 3:
+                    digits = []
+                    for bx, by, bw, bh in cluster:
+                        d_crop = red_mask[by:by+bh, bx:bx+bw]
+                        d, score = _match_mu_digit(d_crop)
+                        digits.append(d)
+                    num_str = "".join(digits)
+                    try:
+                        val = int(num_str)
+                        if 0 <= val <= 2_000_000_000:
+                            avg_y = sum(b[1] for b in cluster) / len(cluster)
+                            avg_w = sum(b[2] for b in cluster) / len(cluster)
+                            # Chất lượng nét chữ: ưu tiên các nét chữ chuẩn (độ rộng 2.8..6.0px) thay vì bị vỡ vụn < 2.5px
+                            width_quality = 1.0 if (2.8 <= avg_w <= 6.0) else 0.5
+                            all_threshold_candidates.append((val, len(digits), avg_y, avg_w, width_quality, num_str))
+                    except Exception:
+                        pass
+
+    if not all_threshold_candidates:
+        return None
+
+    # Ưu tiên chuỗi số có nét chuẩn (width_quality), độ dài lớn nhất (8-10 chữ số) và nằm thấp nhất trong panel
+    all_threshold_candidates.sort(key=lambda c: (c[4], c[1], c[2]), reverse=True)
+    return all_threshold_candidates[0][0]
 
 
 def read_zen_from_game_window(hwnd):
     """
-    Kích hoạt cửa sổ game, nhấn 'V' mở Hành trang, chụp ảnh đọc Zen, nhấn 'V' đóng lại.
-    Trả về số lượng Zen (int) hoặc None nếu không đọc được.
+    Kích hoạt cửa sổ game, mở Hành trang bằng phím 'V', đọc Zen và khôi phục trạng thái.
     """
     if not hwnd or not user32.IsWindow(hwnd):
         return None
 
-    # 1. Focus cửa sổ
+    title = get_window_text(hwnd)
+
+    # 1. Đưa cửa sổ lên trên cùng
     focus_window(hwnd)
-    time.sleep(0.08)
+    time.sleep(0.20)
 
-    # 2. Nhấn 'V' mở Hành Trang
+    # 2. Bấm phím 'V' để mở Hành trang
     release_modifiers()
-    tap_vk(ord("V"), pause=0.12)
-    time.sleep(0.35)
+    tap_vk(ord("V"), pause=0.10)
+    time.sleep(0.45)  # Đợi animation mở hành trang hoàn tất
 
-    # 3. Chụp ảnh client
-    img = capture_window_bgr(hwnd)
+    # 3. Chụp ảnh đọc Zen
+    img_open = capture_window_bgr(hwnd)
+    zen_val = extract_zen_from_image(img_open)
 
-    # 4. Nhấn 'V' đóng Hành Trang
-    tap_vk(ord("V"), pause=0.08)
+    # 4. Nếu chưa đọc được (có thể trước đó hòm đồ đang mở sẵn nên lệnh V vừa rồi đã vô tình đóng nó),
+    # ta bấm 'V' lần nữa để mở lại và thử đọc tiếp
+    if zen_val is None:
+        tap_vk(ord("V"), pause=0.10)
+        time.sleep(0.45)
+        img_retry = capture_window_bgr(hwnd)
+        zen_val = extract_zen_from_image(img_retry)
+        if zen_val is not None:
+            # Đóng lại sau khi đọc thành công
+            tap_vk(ord("V"), pause=0.10)
+    else:
+        # Đóng Hành trang lại
+        tap_vk(ord("V"), pause=0.10)
+
     release_modifiers()
 
-    if img is None:
-        return None
+    h_shape = img_open.shape if img_open is not None else "None"
+    if zen_val is not None:
+        print(f"[Zen OCR] Cửa sổ '{title}' (kích thước: {h_shape}) -> Đọc được: {format_zen(zen_val)} Zen")
+    else:
+        print(f"[Zen OCR] Cửa sổ '{title}' (kích thước: {h_shape}) -> KHÔNG đọc được Zen")
 
-    return extract_zen_from_image(img)
+    return zen_val
 
 
 def list_game_hwnds():
@@ -2627,13 +2717,30 @@ class MegamuLauncherApp(tk.Tk):
                 active_accs = self.get_current_accounts()
                 updated_count = 0
                 failed_count = 0
-                for idx, hwnd in enumerate(hwnds):
-                    if idx >= len(active_accs):
-                        break
-                    acc = active_accs[idx]
+
+                # Lập bản đồ hwnds theo character name để khớp chính xác 1-1
+                hwnd_by_char = {}
+                for h in hwnds:
+                    t = get_window_text(h)
+                    info = parse_game_window_title(t)
+                    if info.get("char_name"):
+                        hwnd_by_char[info["char_name"].lower()] = h
+
+                for idx, acc in enumerate(active_accs):
                     user_name = acc.get("username", f"Slot {idx + 1}")
-                    self.status.set(f"Đang đọc Zen [{user_name}] (Cửa sổ {idx + 1}/{len(hwnds)})...")
-                    zen_val = read_zen_from_game_window(hwnd)
+                    cname = (acc.get("char_name") or "").lower()
+                    target_hwnd = None
+                    if cname and cname in hwnd_by_char:
+                        target_hwnd = hwnd_by_char[cname]
+                    elif idx < len(hwnds):
+                        target_hwnd = hwnds[idx]
+
+                    if not target_hwnd or not user32.IsWindow(target_hwnd):
+                        continue
+
+                    display_name = acc.get("char_name") or user_name
+                    self.status.set(f"Đang đọc Zen [{display_name}] ({idx + 1}/{len(active_accs)})...")
+                    zen_val = read_zen_from_game_window(target_hwnd)
                     if zen_val is not None:
                         acc["zen"] = zen_val
                         updated_count += 1
@@ -2662,32 +2769,45 @@ class MegamuLauncherApp(tk.Tk):
             return
         idx = self.acc_tree.index(sel[0])
         hwnds = list_game_hwnds()
-        if idx >= len(hwnds):
-            messagebox.showwarning(
-                "Không có cửa sổ",
-                f"Tài khoản ở Slot {idx + 1} nhưng hiện tại chỉ có {len(hwnds)} cửa sổ game đang chạy."
-            )
-            return
-
-        hwnd = hwnds[idx]
         active_accs = self.get_current_accounts()
         if idx >= len(active_accs):
             return
         acc = active_accs[idx]
         user_name = acc.get("username", f"Slot {idx + 1}")
+        display_name = acc.get("char_name") or user_name
+
+        # Tìm HWND cho tài khoản: ưu tiên match theo tên nhân vật
+        target_hwnd = None
+        cname = (acc.get("char_name") or "").lower()
+        if cname:
+            for h in hwnds:
+                t = get_window_text(h)
+                info = parse_game_window_title(t)
+                if info.get("char_name") and info["char_name"].lower() == cname:
+                    target_hwnd = h
+                    break
+        if not target_hwnd and idx < len(hwnds):
+            target_hwnd = hwnds[idx]
+
+        if not target_hwnd:
+            messagebox.showwarning(
+                "Không có cửa sổ",
+                f"Không tìm thấy cửa sổ game tương ứng cho tài khoản [{display_name}]."
+            )
+            return
 
         def _worker():
-            self.set_busy(True, f"Đang đọc Zen cho [{user_name}]...")
+            self.set_busy(True, f"Đang đọc Zen cho [{display_name}]...")
             try:
-                zen_val = read_zen_from_game_window(hwnd)
+                zen_val = read_zen_from_game_window(target_hwnd)
                 if zen_val is not None:
                     acc["zen"] = zen_val
                     save_account_store(self.account_store)
                     self.after(0, self._refresh_acc_tree)
                     self.after(0, lambda: self.zen_var.set(format_zen(zen_val)))
-                    self.after(0, lambda: messagebox.showinfo("Cập nhật Zen", f"Tài khoản [{user_name}]: {format_zen(zen_val)} Zen."))
+                    self.after(0, lambda: messagebox.showinfo("Cập nhật Zen", f"Tài khoản [{display_name}]: {format_zen(zen_val)} Zen."))
                 else:
-                    self.after(0, lambda: messagebox.showwarning("Cập nhật Zen", f"Không đọc được Zen từ cửa sổ game của [{user_name}]. Hãy đảm bảo nhân vật đã vào game."))
+                    self.after(0, lambda: messagebox.showwarning("Cập nhật Zen", f"Không đọc được Zen từ cửa sổ game của [{display_name}]. Hãy đảm bảo nhân vật đã vào game."))
             except Exception as e:
                 self.after(0, lambda: messagebox.showerror("Lỗi", f"Lỗi khi đọc Zen: {e}"))
             finally:
