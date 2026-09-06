@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import ssl
 import urllib.error
 import urllib.request
 from datetime import date, datetime
@@ -29,6 +30,47 @@ LICENSE_FILE_PATH = "licenses/keys.json"
 API_BASE = "https://api.github.com"
 USER_AGENT = "MuClick-License"
 ADMIN_PASSWORD = "donpv93"
+
+
+def _get_ssl_context():
+    """Tạo SSL context: ưu tiên certifi -> default -> fallback unverified để chạy được trên mọi máy."""
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        pass
+    try:
+        return ssl.create_default_context()
+    except Exception:
+        pass
+    try:
+        return ssl._create_unverified_context()
+    except Exception:
+        return None
+
+
+def _urlopen(req, timeout=30):
+    ctx = _get_ssl_context()
+    try:
+        return urllib.request.urlopen(req, timeout=timeout, context=ctx)
+    except urllib.error.URLError as e:
+        err_str = str(e).lower()
+        if "certificate" in err_str or "ssl" in err_str or "verify failed" in err_str:
+            try:
+                unverified_ctx = ssl._create_unverified_context()
+                return urllib.request.urlopen(req, timeout=timeout, context=unverified_ctx)
+            except Exception:
+                raise e
+        raise e
+    except Exception as e:
+        err_str = str(e).lower()
+        if "certificate" in err_str or "ssl" in err_str or "verify failed" in err_str:
+            try:
+                unverified_ctx = ssl._create_unverified_context()
+                return urllib.request.urlopen(req, timeout=timeout, context=unverified_ctx)
+            except Exception:
+                raise e
+        raise e
 
 
 class LicenseOnlineError(Exception):
@@ -65,7 +107,7 @@ def _request_json(method: str, url: str, token: str, body: dict | None = None):
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with _urlopen(req, timeout=30) as resp:
             raw = resp.read().decode("utf-8")
             return json.loads(raw) if raw else {}
     except urllib.error.HTTPError as e:

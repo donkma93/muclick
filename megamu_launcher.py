@@ -19,7 +19,7 @@ import time
 import tkinter as tk
 import winreg
 from ctypes import wintypes
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from muclick_gates import (
     is_admin_password,
@@ -100,38 +100,86 @@ SM_CXVIRTUALSCREEN = 78
 SM_CYVIRTUALSCREEN = 79
 MONITORINFOF_PRIMARY = 0x00000001
 
-MEGAMU_PATH = r"C:\Users\donpv\AppData\Local\Programs\MEGAMU\MEGAMU.exe"
-MEGAMU_DIR = r"C:\Users\donpv\AppData\Local\Programs\MEGAMU"
-DASHBOARD_PATH = os.path.join(MEGAMU_DIR, "Dashboard.exe")
-MEGAMU_CONFIG_INI = os.path.join(MEGAMU_DIR, "config.ini")
 UNITY_CLASS = "UnityWndClass"
 MEGAMU_PROCESS_NAMES = ("MEGAMU.exe", "Dashboard.exe")
 APP_DIR = install_dir()
 # Dữ liệu user nằm %APPDATA%\MuClick (survive khi update thay exe)
 migrate_user_files(
-    ("accounts.json", "click_coords.json", "autoclick_points.json")
+    ("accounts.json", "click_coords.json", "autoclick_points.json", "app_settings.json")
 )
 ACCOUNTS_FILE = data_path("accounts.json")
 COORDS_FILE = data_path("click_coords.json")
 AUTOCLICK_FILE = data_path("autoclick_points.json")
+SETTINGS_FILE = data_path("app_settings.json")
 
-# Unity PlayerPrefs: danh sách account đã đăng nhập
-REG_MEGAMU = (winreg.HKEY_CURRENT_USER, r"Software\MEGAMU\MEGAMU")
 
-MEGAMU_PATH = r"C:\Users\donpv\AppData\Local\Programs\MEGAMU\MEGAMU.exe"
-MEGAMU_DIR = r"C:\Users\donpv\AppData\Local\Programs\MEGAMU"
-DASHBOARD_PATH = os.path.join(MEGAMU_DIR, "Dashboard.exe")
-MEGAMU_CONFIG_INI = os.path.join(MEGAMU_DIR, "config.ini")
-UNITY_CLASS = "UnityWndClass"
-MEGAMU_PROCESS_NAMES = ("MEGAMU.exe", "Dashboard.exe")
-APP_DIR = install_dir()
-# Dữ liệu user nằm %APPDATA%\MuClick (survive khi update thay exe)
-migrate_user_files(
-    ("accounts.json", "click_coords.json", "autoclick_points.json")
-)
-ACCOUNTS_FILE = data_path("accounts.json")
-COORDS_FILE = data_path("click_coords.json")
-AUTOCLICK_FILE = data_path("autoclick_points.json")
+def load_app_settings() -> dict:
+    if os.path.isfile(SETTINGS_FILE):
+        try:
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def save_app_settings(settings: dict):
+    try:
+        cur = load_app_settings()
+        cur.update(settings)
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(cur, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def find_default_megamu_path() -> str:
+    saved = (load_app_settings().get("megamu_path") or "").strip()
+    if saved and os.path.isfile(saved):
+        return saved
+    localappdata = os.environ.get("LOCALAPPDATA", "")
+    if localappdata:
+        p = os.path.join(localappdata, "Programs", "MEGAMU", "MEGAMU.exe")
+        if os.path.isfile(p):
+            return p
+    candidates = [
+        r"C:\Users\donpv\AppData\Local\Programs\MEGAMU\MEGAMU.exe",
+        r"C:\Program Files\MEGAMU\MEGAMU.exe",
+        r"C:\Program Files (x86)\MEGAMU\MEGAMU.exe",
+        r"D:\MEGAMU\MEGAMU.exe",
+        r"E:\MEGAMU\MEGAMU.exe",
+        r"D:\Games\MEGAMU\MEGAMU.exe",
+        r"E:\Games\MEGAMU\MEGAMU.exe",
+    ]
+    for c in candidates:
+        if os.path.isfile(c):
+            return c
+    if localappdata:
+        return os.path.join(localappdata, "Programs", "MEGAMU", "MEGAMU.exe")
+    return r"C:\MEGAMU\MEGAMU.exe"
+
+
+def get_megamu_dir(megamu_path: str | None = None) -> str:
+    p = megamu_path or find_default_megamu_path()
+    if p:
+        d = os.path.dirname(os.path.abspath(p))
+        if d:
+            return d
+    return r"C:\MEGAMU"
+
+
+def get_dashboard_path(megamu_path: str | None = None) -> str:
+    return os.path.join(get_megamu_dir(megamu_path), "Dashboard.exe")
+
+
+def get_megamu_config_ini(megamu_path: str | None = None) -> str:
+    return os.path.join(get_megamu_dir(megamu_path), "config.ini")
+
+
+MEGAMU_PATH = find_default_megamu_path()
+MEGAMU_DIR = get_megamu_dir(MEGAMU_PATH)
+DASHBOARD_PATH = get_dashboard_path(MEGAMU_PATH)
+MEGAMU_CONFIG_INI = get_megamu_config_ini(MEGAMU_PATH)
 
 # Unity PlayerPrefs: danh sách account đã đăng nhập
 REG_MEGAMU = (winreg.HKEY_CURRENT_USER, r"Software\MEGAMU\MEGAMU")
@@ -915,19 +963,81 @@ def save_json(path, data):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-def load_accounts():
-    data = load_json(ACCOUNTS_FILE, {"accounts": []})
-    accounts = data.get("accounts", [])
-    for acc in accounts:
-        if "zen" in acc:
-            acc["zen"] = parse_zen(acc["zen"])
-        else:
-            acc["zen"] = 0
-    return accounts
+DEFAULT_ACCOUNT_GROUPS = ["Chơi game", "Moss"]
 
 
-def save_accounts(accounts):
-    save_json(ACCOUNTS_FILE, {"accounts": accounts})
+def default_account_store():
+    return {
+        "version": 2,
+        "active_group": "Chơi game",
+        "groups": {
+            "Chơi game": [],
+            "Moss": [],
+        },
+    }
+
+
+def load_account_store():
+    raw = load_json(ACCOUNTS_FILE, None)
+    if raw is None:
+        store = default_account_store()
+        save_json(ACCOUNTS_FILE, store)
+        return store
+
+    if isinstance(raw, dict) and "groups" in raw and isinstance(raw["groups"], dict):
+        store = raw
+        if "active_group" not in store or not store["active_group"]:
+            store["active_group"] = (
+                list(store["groups"].keys())[0] if store["groups"] else "Chơi game"
+            )
+        # Đảm bảo các group mặc định luôn có
+        for g in DEFAULT_ACCOUNT_GROUPS:
+            if g not in store["groups"]:
+                store["groups"][g] = []
+        # Chuyển đổi / kiểm tra zen
+        for g_name, acc_list in store["groups"].items():
+            if isinstance(acc_list, list):
+                for acc in acc_list:
+                    if isinstance(acc, dict):
+                        acc["zen"] = parse_zen(acc.get("zen", 0))
+        return store
+
+    # Bản cũ: {"accounts": [...]} hoặc list [...]
+    store = default_account_store()
+    old_list = []
+    if isinstance(raw, dict) and "accounts" in raw and isinstance(raw["accounts"], list):
+        old_list = raw["accounts"]
+    elif isinstance(raw, list):
+        old_list = raw
+
+    for acc in old_list:
+        if isinstance(acc, dict):
+            acc["zen"] = parse_zen(acc.get("zen", 0))
+
+    store["groups"]["Chơi game"] = old_list
+    store["active_group"] = "Chơi game"
+    save_json(ACCOUNTS_FILE, store)
+    return store
+
+
+def save_account_store(store):
+    save_json(ACCOUNTS_FILE, store)
+
+
+def load_accounts(group=None):
+    store = load_account_store()
+    g = group or store.get("active_group") or "Chơi game"
+    return store.get("groups", {}).get(g, [])
+
+
+def save_accounts(accounts, group=None):
+    store = load_account_store()
+    g = group or store.get("active_group") or "Chơi game"
+    if "groups" not in store:
+        store["groups"] = {}
+    store["groups"][g] = accounts
+    store["active_group"] = g
+    save_account_store(store)
 
 
 def _is_legacy_coords(data):
@@ -1094,11 +1204,13 @@ def close_megamu_and_dashboard(wait_seconds=8.0):
     return info
 
 
-def open_dashboard():
+def open_dashboard(megamu_path: str | None = None):
     """Mở Dashboard.exe mới. Trả về True nếu spawn được."""
-    if not os.path.isfile(DASHBOARD_PATH):
+    dash_path = get_dashboard_path(megamu_path)
+    d_dir = get_megamu_dir(megamu_path)
+    if not os.path.isfile(dash_path):
         return False
-    subprocess.Popen([DASHBOARD_PATH], cwd=MEGAMU_DIR)
+    subprocess.Popen([dash_path], cwd=d_dir)
     return True
 
 
@@ -1107,6 +1219,7 @@ def clear_megamu_saved_accounts(
     clear_last_username=True,
     close_apps=False,
     reopen_dashboard=False,
+    megamu_path: str | None = None,
 ):
     """
     Xóa danh sách account đã đăng nhập của MEGAMU.
@@ -1157,23 +1270,24 @@ def clear_megamu_saved_accounts(
                 _reg_write_binary_json(REG_SETTINGS, settings)
                 info["settings_cleared"] = True
 
-        if also_clear_dashboard and os.path.isfile(MEGAMU_CONFIG_INI):
+        cfg_ini = get_megamu_config_ini(megamu_path)
+        if also_clear_dashboard and os.path.isfile(cfg_ini):
             try:
-                with open(MEGAMU_CONFIG_INI, "r", encoding="utf-8") as f:
+                with open(cfg_ini, "r", encoding="utf-8") as f:
                     cfg = json.load(f)
                 if isinstance(cfg, dict):
                     cfg["accounts"] = {}
                     cfg["accountsM"] = {}
-                    with open(MEGAMU_CONFIG_INI, "w", encoding="utf-8") as f:
+                    with open(cfg_ini, "w", encoding="utf-8") as f:
                         json.dump(cfg, f, ensure_ascii=False, separators=(",", ":"))
                     info["dashboard_cleared"] = True
             except Exception as e:
                 info["error"] = f"config.ini: {e}"
 
         if reopen_dashboard and also_clear_dashboard and not info.get("error"):
-            info["dashboard_reopened"] = open_dashboard()
+            info["dashboard_reopened"] = open_dashboard(megamu_path)
             if not info["dashboard_reopened"]:
-                info["error"] = f"Không tìm thấy Dashboard: {DASHBOARD_PATH}"
+                info["error"] = f"Không tìm thấy Dashboard: {get_dashboard_path(megamu_path)}"
     except Exception as e:
         info["error"] = str(e)
     info["after"] = get_saved_account_usernames()
@@ -1365,7 +1479,14 @@ class MegamuLauncherApp(tk.Tk):
         self._stop_autoclick = False
         self._license_info = lic
 
-        self.accounts = load_accounts()
+        self.account_store = load_account_store()
+        self.account_group_var = tk.StringVar(
+            value=self.account_store.get("active_group", "Chơi game")
+        )
+        self.auto_account_group_var = tk.StringVar(
+            value=self.account_store.get("active_group", "Chơi game")
+        )
+        self.accounts = self.get_current_accounts()
         self.coords_store = load_coords_store()
         self.autoclick_store = load_autoclick_store()
         self.monitor_vars = {}
@@ -1410,8 +1531,146 @@ class MegamuLauncherApp(tk.Tk):
         self.bind("<F8>", self._on_f8)
         self.bind("<Escape>", self._on_escape)
 
+    # ----- Account group helpers -----
+    def get_current_group(self):
+        return self.account_group_var.get() or "Chơi game"
+
+    def get_current_accounts(self):
+        g = self.get_current_group()
+        groups = self.account_store.setdefault("groups", {})
+        if g not in groups or not isinstance(groups[g], list):
+            groups[g] = []
+        return groups[g]
+
+    def get_group_list(self):
+        groups = self.account_store.setdefault("groups", {})
+        for default_g in DEFAULT_ACCOUNT_GROUPS:
+            if default_g not in groups:
+                groups[default_g] = []
+        return list(groups.keys())
+
+    def _refresh_group_combos(self):
+        groups = self.get_group_list()
+        if hasattr(self, "acc_group_combo"):
+            self.acc_group_combo.configure(values=groups)
+        if hasattr(self, "auto_group_combo"):
+            self.auto_group_combo.configure(values=groups)
+        if hasattr(self, "acc_group_count_lbl"):
+            cur_accs = self.get_current_accounts()
+            self.acc_group_count_lbl.configure(
+                text=f"({len(cur_accs)} tài khoản)"
+            )
+        if hasattr(self, "auto_group_info_lbl"):
+            auto_g = (
+                self.auto_account_group_var.get()
+                if hasattr(self, "auto_account_group_var")
+                else self.get_current_group()
+            )
+            g_accs = self.account_store.get("groups", {}).get(auto_g, [])
+            self.auto_group_info_lbl.configure(
+                text=f"({len(g_accs)} tài khoản)"
+            )
+
+    def _on_acc_group_selected(self, _event=None):
+        g = self.account_group_var.get()
+        if not g:
+            return
+        self.account_store["active_group"] = g
+        save_account_store(self.account_store)
+        self.accounts = self.get_current_accounts()
+        self._refresh_group_combos()
+        self._refresh_acc_tree()
+        self.status.set(f"Đang chọn loại tài khoản: [{g}] ({len(self.accounts)} TK)")
+
+    def _on_auto_group_selected(self, _event=None):
+        g = self.auto_account_group_var.get()
+        if not g:
+            return
+        self._refresh_group_combos()
+        if hasattr(self, "slot_tree"):
+            self._refresh_slot_ui()
+        g_accs = self.account_store.get("groups", {}).get(g, [])
+        self.status.set(f"Auto Login sẽ dùng danh sách: [{g}] ({len(g_accs)} TK)")
+
+    def on_add_account_group(self):
+        name = simpledialog.askstring(
+            "Thêm loại tài khoản",
+            "Nhập tên loại tài khoản mới (ví dụ: Moss, Chơi game, Farm Zen, Buff...):",
+            parent=self,
+        )
+        if not name:
+            return
+        name = name.strip()
+        if not name:
+            return
+        groups = self.account_store.setdefault("groups", {})
+        if name in groups:
+            messagebox.showinfo("Đã tồn tại", f"Loại tài khoản '{name}' đã có sẵn.", parent=self)
+            self.account_group_var.set(name)
+            self._on_acc_group_selected()
+            return
+        groups[name] = []
+        self.account_group_var.set(name)
+        self._on_acc_group_selected()
+        self.status.set(f"Đã tạo loại tài khoản mới: '{name}'")
+
+    def on_rename_account_group(self):
+        old_name = self.get_current_group()
+        new_name = simpledialog.askstring(
+            "Đổi tên loại tài khoản",
+            f"Nhập tên mới cho loại tài khoản '{old_name}':",
+            initialvalue=old_name,
+            parent=self,
+        )
+        if not new_name:
+            return
+        new_name = new_name.strip()
+        if not new_name or new_name == old_name:
+            return
+        groups = self.account_store.setdefault("groups", {})
+        if new_name in groups:
+            messagebox.showwarning("Trùng tên", f"Tên '{new_name}' đã tồn tại.", parent=self)
+            return
+        groups[new_name] = groups.pop(old_name, [])
+        self.account_store["active_group"] = new_name
+        self.account_group_var.set(new_name)
+        if hasattr(self, "auto_account_group_var") and self.auto_account_group_var.get() == old_name:
+            self.auto_account_group_var.set(new_name)
+        save_account_store(self.account_store)
+        self.accounts = self.get_current_accounts()
+        self._refresh_group_combos()
+        self._refresh_acc_tree()
+        self.status.set(f"Đã đổi tên '{old_name}' → '{new_name}'")
+
+    def on_delete_account_group(self):
+        g = self.get_current_group()
+        groups = self.account_store.setdefault("groups", {})
+        if len(groups) <= 1:
+            messagebox.showwarning(
+                "Không thể xóa", "Phải giữ lại ít nhất 1 loại tài khoản.", parent=self
+            )
+            return
+        count = len(groups.get(g, []))
+        if not messagebox.askyesno(
+            "Xác nhận xóa",
+            f"Bạn có chắc muốn xóa loại tài khoản '{g}'?\n"
+            f"(Sẽ xóa {count} tài khoản trong danh sách này)",
+            parent=self,
+        ):
+            return
+        groups.pop(g, None)
+        next_g = list(groups.keys())[0]
+        self.account_store["active_group"] = next_g
+        self.account_group_var.set(next_g)
+        if hasattr(self, "auto_account_group_var") and self.auto_account_group_var.get() == g:
+            self.auto_account_group_var.set(next_g)
+        save_account_store(self.account_store)
+        self.accounts = self.get_current_accounts()
+        self._refresh_group_combos()
+        self._refresh_acc_tree()
+        self.status.set(f"Đã xóa loại tài khoản '{g}'. Chuyển sang '{next_g}'.")
+
     def open_admin_license(self):
-        import tkinter.simpledialog as simpledialog
         pwd = simpledialog.askstring(
             "Admin Login",
             "Nhập mật khẩu quản trị (admin):",
@@ -1574,18 +1833,73 @@ class MegamuLauncherApp(tk.Tk):
             for i in range(count)
         ], rows
 
+    def _on_path_changed(self, *args):
+        p = self.path_var.get().strip()
+        if p:
+            save_app_settings({"megamu_path": p})
+
+    def browse_megamu_path(self):
+        cur = self.path_var.get().strip()
+        init_dir = (
+            os.path.dirname(cur)
+            if cur and os.path.exists(os.path.dirname(cur))
+            else (os.environ.get("LOCALAPPDATA") or "")
+        )
+        file_path = filedialog.askopenfilename(
+            title="Chọn file MEGAMU.exe hoặc Launcher",
+            initialdir=init_dir or None,
+            filetypes=[
+                ("MEGAMU Executable", "MEGAMU.exe"),
+                ("File thực thi (*.exe)", "*.exe"),
+                ("Tất cả tập tin (*.*)", "*.*"),
+            ],
+        )
+        if file_path:
+            file_path = os.path.normpath(file_path)
+            self.path_var.set(file_path)
+            save_app_settings({"megamu_path": file_path})
+            self.status.set(f"Đã chọn đường dẫn: {file_path}")
+
+    def open_megamu_folder(self):
+        p = self.path_var.get().strip()
+        folder = get_megamu_dir(p)
+        if os.path.isdir(folder):
+            try:
+                os.startfile(folder)
+            except Exception as e:
+                messagebox.showerror("Lỗi mở thư mục", str(e))
+        else:
+            messagebox.showwarning(
+                "Thư mục không tồn tại", f"Không tìm thấy thư mục:\n{folder}"
+            )
+
     # ----- Launch tab -----
     def _build_launch_tab(self):
         frm = self.tab_launch
         sw, sh = get_screen_size()
 
         ttk.Label(frm, text="Đường dẫn MEGAMU:", font=("", 9, "bold")).grid(
-            row=0, column=0, sticky="w"
+            row=0, column=0, columnspan=4, sticky="w"
         )
-        self.path_var = tk.StringVar(value=MEGAMU_PATH)
-        ttk.Entry(frm, textvariable=self.path_var, width=64).grid(
-            row=1, column=0, columnspan=4, sticky="ew", pady=(2, 8)
-        )
+        path_box = ttk.Frame(frm)
+        path_box.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(2, 8))
+
+        self.path_var = tk.StringVar(value=find_default_megamu_path())
+        self.path_var.trace_add("write", self._on_path_changed)
+
+        path_entry = ttk.Entry(path_box, textvariable=self.path_var)
+        path_entry.pack(side="left", fill="x", expand=True)
+
+        ttk.Button(
+            path_box,
+            text="Duyệt / Chọn file...",
+            command=self.browse_megamu_path,
+        ).pack(side="left", padx=(6, 0))
+        ttk.Button(
+            path_box,
+            text="Mở thư mục",
+            command=self.open_megamu_folder,
+        ).pack(side="left", padx=(4, 0))
 
         opts = ttk.LabelFrame(frm, text=" Cấu hình ", padding=8)
         opts.grid(row=2, column=0, columnspan=4, sticky="ew")
@@ -1718,6 +2032,45 @@ class MegamuLauncherApp(tk.Tk):
     def _build_accounts_tab(self):
         frm = self.tab_accounts
 
+        group_frame = ttk.LabelFrame(frm, text=" Loại / Mục đích tài khoản ", padding=8)
+        group_frame.grid(row=0, column=0, columnspan=7, sticky="ew", pady=(0, 8))
+
+        ttk.Label(group_frame, text="Loại tài khoản:", font=("", 9, "bold")).pack(
+            side="left", padx=(0, 6)
+        )
+
+        self.acc_group_combo = ttk.Combobox(
+            group_frame,
+            textvariable=self.account_group_var,
+            values=self.get_group_list(),
+            state="readonly",
+            width=16,
+        )
+        self.acc_group_combo.pack(side="left", padx=(0, 8))
+        self.acc_group_combo.bind("<<ComboboxSelected>>", self._on_acc_group_selected)
+
+        ttk.Button(
+            group_frame,
+            text="➕ Thêm loại...",
+            command=self.on_add_account_group,
+            width=13,
+        ).pack(side="left", padx=(0, 4))
+        ttk.Button(
+            group_frame,
+            text="✏️ Đổi tên...",
+            command=self.on_rename_account_group,
+            width=11,
+        ).pack(side="left", padx=(0, 4))
+        ttk.Button(
+            group_frame,
+            text="🗑️ Xóa loại",
+            command=self.on_delete_account_group,
+            width=10,
+        ).pack(side="left", padx=(0, 8))
+
+        self.acc_group_count_lbl = ttk.Label(group_frame, text="", foreground="#055")
+        self.acc_group_count_lbl.pack(side="left")
+
         cols = ("slot", "user", "pass", "zen", "status")
         self.acc_tree = ttk.Treeview(frm, columns=cols, show="headings", height=11)
         self.acc_tree.heading("slot", text="Vị trí")
@@ -1732,15 +2085,15 @@ class MegamuLauncherApp(tk.Tk):
         self.acc_tree.column("status", width=120, anchor="center")
         self.acc_tree.tag_configure("low_zen", foreground="#c00000")
         self.acc_tree.tag_configure("normal", foreground="#000000")
-        self.acc_tree.grid(row=0, column=0, columnspan=6, sticky="nsew")
+        self.acc_tree.grid(row=1, column=0, columnspan=6, sticky="nsew")
         self.acc_tree.bind("<<TreeviewSelect>>", self._on_acc_select)
 
         sb = ttk.Scrollbar(frm, orient="vertical", command=self.acc_tree.yview)
         self.acc_tree.configure(yscrollcommand=sb.set)
-        sb.grid(row=0, column=6, sticky="ns")
+        sb.grid(row=1, column=6, sticky="ns")
 
         inp_frm = ttk.Frame(frm)
-        inp_frm.grid(row=1, column=0, columnspan=6, sticky="w", pady=(8, 0))
+        inp_frm.grid(row=2, column=0, columnspan=7, sticky="w", pady=(8, 0))
 
         ttk.Label(inp_frm, text="User:").pack(side="left")
         self.user_var = tk.StringVar()
@@ -1759,7 +2112,7 @@ class MegamuLauncherApp(tk.Tk):
         ttk.Button(inp_frm, text="2B", width=4, command=lambda: self.zen_var.set("2.000.000.000")).pack(side="left", padx=2)
 
         bf = ttk.Frame(frm)
-        bf.grid(row=2, column=0, columnspan=6, sticky="w", pady=(8, 0))
+        bf.grid(row=3, column=0, columnspan=7, sticky="w", pady=(8, 0))
         ttk.Button(bf, text="Thêm", command=self.acc_add, width=10).pack(side="left", padx=(0, 6))
         ttk.Button(bf, text="Sửa dòng chọn", command=self.acc_edit, width=14).pack(
             side="left", padx=(0, 6)
@@ -1779,13 +2132,15 @@ class MegamuLauncherApp(tk.Tk):
             frm,
             text=(
                 f"Lưu tại: {ACCOUNTS_FILE}\n"
+                "• Mỗi loại tài khoản (Chơi game, Moss...) có danh sách tài khoản riêng biệt để Auto Login.\n"
                 "• Thứ tự trên→dưới = Slot 1, Slot 2, Slot 3... tương ứng với từng điểm click trong Auto Click.\n"
                 "• Auto Click: Mỗi lần click trừ 10.000.000 Zen. Khi còn dưới 200.000.000 Zen hệ thống sẽ bật cảnh báo."
             ),
             foreground="#555",
             justify="left",
-        ).grid(row=3, column=0, columnspan=6, sticky="w", pady=(10, 0))
+        ).grid(row=4, column=0, columnspan=7, sticky="w", pady=(10, 0))
 
+        self._refresh_group_combos()
         self._refresh_acc_tree()
 
     def _quick_add_zen(self, delta):
@@ -1796,6 +2151,7 @@ class MegamuLauncherApp(tk.Tk):
     def _refresh_acc_tree(self):
         for i in self.acc_tree.get_children():
             self.acc_tree.delete(i)
+        self.accounts = self.get_current_accounts()
         for idx, acc in enumerate(self.accounts):
             shown_pass = "*" * min(len(acc.get("password", "")), 12) or ""
             zen = parse_zen(acc.get("zen", 0))
@@ -1818,10 +2174,11 @@ class MegamuLauncherApp(tk.Tk):
         if not sel:
             return
         idx = self.acc_tree.index(sel[0])
-        if 0 <= idx < len(self.accounts):
-            self.user_var.set(self.accounts[idx].get("username", ""))
-            self.pass_var.set(self.accounts[idx].get("password", ""))
-            zen = self.accounts[idx].get("zen", 0)
+        accs = self.get_current_accounts()
+        if 0 <= idx < len(accs):
+            self.user_var.set(accs[idx].get("username", ""))
+            self.pass_var.set(accs[idx].get("password", ""))
+            zen = accs[idx].get("zen", 0)
             self.zen_var.set(format_zen(zen))
 
     def acc_add(self):
@@ -1831,13 +2188,15 @@ class MegamuLauncherApp(tk.Tk):
         if not u:
             messagebox.showwarning("Thiếu dữ liệu", "Nhập tài khoản.")
             return
-        self.accounts.append({"username": u, "password": p, "zen": z})
+        accs = self.get_current_accounts()
+        accs.append({"username": u, "password": p, "zen": z})
         self.user_var.set("")
         self.pass_var.set("")
         self.zen_var.set("0")
+        save_account_store(self.account_store)
+        self._refresh_group_combos()
         self._refresh_acc_tree()
-        save_accounts(self.accounts)
-        self.status.set(f"Đã thêm tài khoản. Tổng: {len(self.accounts)}")
+        self.status.set(f"Đã thêm tài khoản vào [{self.get_current_group()}]. Tổng: {len(accs)}")
 
     def acc_edit(self):
         sel = self.acc_tree.selection()
@@ -1850,19 +2209,23 @@ class MegamuLauncherApp(tk.Tk):
         if not u:
             messagebox.showwarning("Thiếu dữ liệu", "Nhập tài khoản.")
             return
-        self.accounts[idx] = {"username": u, "password": p, "zen": z}
+        accs = self.get_current_accounts()
+        accs[idx] = {"username": u, "password": p, "zen": z}
+        save_account_store(self.account_store)
+        self._refresh_group_combos()
         self._refresh_acc_tree()
-        save_accounts(self.accounts)
-        self.status.set(f"Đã sửa tài khoản #{idx + 1}")
+        self.status.set(f"Đã sửa tài khoản #{idx + 1} trong [{self.get_current_group()}]")
 
     def acc_delete(self):
         sel = self.acc_tree.selection()
         if not sel:
             return
         idx = self.acc_tree.index(sel[0])
-        del self.accounts[idx]
+        accs = self.get_current_accounts()
+        del accs[idx]
+        save_account_store(self.account_store)
+        self._refresh_group_combos()
         self._refresh_acc_tree()
-        save_accounts(self.accounts)
 
     def acc_move(self, delta):
         sel = self.acc_tree.selection()
@@ -1870,23 +2233,25 @@ class MegamuLauncherApp(tk.Tk):
             return
         idx = self.acc_tree.index(sel[0])
         j = idx + delta
-        if j < 0 or j >= len(self.accounts):
+        accs = self.get_current_accounts()
+        if j < 0 or j >= len(accs):
             return
-        self.accounts[idx], self.accounts[j] = self.accounts[j], self.accounts[idx]
+        accs[idx], accs[j] = accs[j], accs[idx]
+        save_account_store(self.account_store)
         self._refresh_acc_tree()
         kids = self.acc_tree.get_children()
         self.acc_tree.selection_set(kids[j])
-        save_accounts(self.accounts)
 
     def acc_save(self):
-        save_accounts(self.accounts)
-        self.status.set(f"Đã lưu {len(self.accounts)} tài khoản.")
+        save_account_store(self.account_store)
+        self._refresh_group_combos()
+        self.status.set(f"Đã lưu {len(self.get_current_accounts())} tài khoản trong [{self.get_current_group()}].")
 
     # ----- Auto login tab -----
     def _build_auto_tab(self):
         frm = self.tab_auto
 
-        top = ttk.LabelFrame(frm, text=" Hồ sơ layout (mỗi kích thước lưới 1 bộ tọa độ) ", padding=8)
+        top = ttk.LabelFrame(frm, text=" Hồ sơ layout & Tài khoản đăng nhập ", padding=8)
         top.grid(row=0, column=0, columnspan=4, sticky="ew")
 
         ttk.Label(top, text="Layout:").grid(row=0, column=0, sticky="w")
@@ -1905,9 +2270,25 @@ class MegamuLauncherApp(tk.Tk):
             row=0, column=2, sticky="w"
         )
 
+        ttk.Label(top, text="Loại tài khoản:", font=("", 9, "bold")).grid(
+            row=1, column=0, sticky="w", pady=(6, 0)
+        )
+        self.auto_group_combo = ttk.Combobox(
+            top,
+            textvariable=self.auto_account_group_var,
+            values=self.get_group_list(),
+            width=16,
+            state="readonly",
+        )
+        self.auto_group_combo.grid(row=1, column=1, sticky="w", padx=(6, 12), pady=(6, 0))
+        self.auto_group_combo.bind("<<ComboboxSelected>>", self._on_auto_group_selected)
+
+        self.auto_group_info_lbl = ttk.Label(top, text="", foreground="#055")
+        self.auto_group_info_lbl.grid(row=1, column=2, sticky="w", pady=(6, 0))
+
         self.layout_status = tk.StringVar(value="")
         ttk.Label(top, textvariable=self.layout_status, foreground="#055").grid(
-            row=1, column=0, columnspan=4, sticky="w", pady=(6, 0)
+            row=2, column=0, columnspan=4, sticky="w", pady=(6, 0)
         )
 
         # Slot list
@@ -2067,9 +2448,19 @@ class MegamuLauncherApp(tk.Tk):
         name = layout.get("name") or self.active_layout_name()
         ready = layout_ready_count(layout)
         total = layout["count"]
-        self.layout_status.set(
-            f"Layout {name}: đã ghi đủ {ready}/{total} ô  |  file: click_coords.json"
+        auto_g = (
+            self.auto_account_group_var.get()
+            if hasattr(self, "auto_account_group_var")
+            else self.get_current_group()
         )
+        g_accs = self.account_store.get("groups", {}).get(auto_g, [])
+        self.layout_status.set(
+            f"Layout {name}: đã ghi đủ {ready}/{total} ô  |  Loại TK: [{auto_g}] ({len(g_accs)} TK)"
+        )
+        if hasattr(self, "auto_group_info_lbl"):
+            self.auto_group_info_lbl.configure(
+                text=f"({len(g_accs)} tài khoản)"
+            )
 
         # update spin range
         self.slot_spin.configure(to=max(1, total))
@@ -2454,6 +2845,7 @@ class MegamuLauncherApp(tk.Tk):
                 clear_last_username=True,
                 close_apps=close_and_reopen,
                 reopen_dashboard=close_and_reopen and clear_dash,
+                megamu_path=self.path_var.get().strip(),
             )
             def done():
                 self.refresh_saved_accounts()
@@ -2538,6 +2930,7 @@ class MegamuLauncherApp(tk.Tk):
                     clear_last_username=True,
                     close_apps=close_and_reopen,
                     reopen_dashboard=close_and_reopen and clear_dash,
+                    megamu_path=path,
                 )
                 self.after(0, self.refresh_saved_accounts)
                 if info.get("error"):
@@ -2560,10 +2953,11 @@ class MegamuLauncherApp(tk.Tk):
         wait = float(self.wait_var.get())
         before = set(list_game_hwnds())
         launched = 0
+        game_dir = get_megamu_dir(path)
         for i in range(count):
             self.after(0, lambda i=i: self.status.set(f"Đang mở {i + 1}/{count}..."))
             try:
-                subprocess.Popen([path], cwd=MEGAMU_DIR)
+                subprocess.Popen([path], cwd=game_dir)
                 launched += 1
             except Exception as e:
                 self.after(0, lambda: self.set_busy(False, f"Lỗi: {e}"))
@@ -2683,10 +3077,18 @@ class MegamuLauncherApp(tk.Tk):
         return mode
 
     def _account_at(self, index):
-        """Account theo thứ tự danh sách; thiếu hoặc user trống = ô để trống."""
-        if index < 0 or index >= len(self.accounts):
+        """Account theo thứ tự danh sách của loại tài khoản được chọn; thiếu hoặc user trống = ô để trống."""
+        auto_g = (
+            self.auto_account_group_var.get()
+            if hasattr(self, "auto_account_group_var")
+            else self.get_current_group()
+        )
+        acc_list = self.account_store.get("groups", {}).get(auto_g, [])
+        if index < 0 or index >= len(acc_list):
             return None
-        acc = self.accounts[index]
+        acc = acc_list[index]
+        if not isinstance(acc, dict):
+            return None
         username = (acc.get("username") or "").strip()
         if not username:
             return None
@@ -2729,10 +3131,14 @@ class MegamuLauncherApp(tk.Tk):
                 }
             )
 
-        # Account ở dưới các cửa sổ/layout hiện có được để nguyên trong danh
-        # sách, nhưng không tự động login trong lần chạy này.
+        auto_g = (
+            self.auto_account_group_var.get()
+            if hasattr(self, "auto_account_group_var")
+            else self.get_current_group()
+        )
+        acc_list = self.account_store.get("groups", {}).get(auto_g, [])
         unused_accounts = [
-            i + 1 for i in range(usable_count, len(self.accounts)) if self._account_at(i)
+            i + 1 for i in range(usable_count, len(acc_list)) if self._account_at(i)
         ]
         return plan, skipped_empty, missing_coords, unused_accounts
 
@@ -2750,11 +3156,16 @@ class MegamuLauncherApp(tk.Tk):
 
         slot, idx = self.current_slot()
         acc = self._account_at(idx)
+        auto_g = (
+            self.auto_account_group_var.get()
+            if hasattr(self, "auto_account_group_var")
+            else self.get_current_group()
+        )
         if not acc:
             messagebox.showinfo(
                 "Ô trống",
-                f"Ô {idx + 1} không có tài khoản trong danh sách (để trống).\n"
-                f"Thêm account ở dòng #{idx + 1} nếu muốn login ô này.",
+                f"Ô {idx + 1} không có tài khoản trong loại [{auto_g}] (để trống).\n"
+                f"Thêm account ở dòng #{idx + 1} của loại [{auto_g}] nếu muốn login ô này.",
             )
             return
         if not slot_complete(slot):
@@ -2772,7 +3183,7 @@ class MegamuLauncherApp(tk.Tk):
 
         hwnd = hwnds[idx]
         self._stop_login = False
-        self.set_busy(True, f"Thử login ô {idx + 1} ({acc['username']})...")
+        self.set_busy(True, f"Thử login ô {idx + 1} ({acc['username']}) - [{auto_g}]...")
         self.btn_stop.configure(state="normal")
         self.iconify()
 
@@ -2786,7 +3197,7 @@ class MegamuLauncherApp(tk.Tk):
                     self._login_delays(),
                     input_mode=self._input_mode(),
                 )
-                msg = f"Đã thử ô {idx + 1}: {acc['username']} (mode={self._input_mode()})"
+                msg = f"Đã thử ô {idx + 1}: {acc['username']} - [{auto_g}] (mode={self._input_mode()})"
             except Exception as e:
                 msg = f"Lỗi: {e}"
             self.after(0, lambda: self._finish_login(msg))
@@ -2802,6 +3213,11 @@ class MegamuLauncherApp(tk.Tk):
             return
 
         layout = self.active_layout()
+        auto_g = (
+            self.auto_account_group_var.get()
+            if hasattr(self, "auto_account_group_var")
+            else self.get_current_group()
+        )
         plan, skipped_empty, missing_coords, unused_accounts = self._build_login_plan(hwnds)
 
         if missing_coords:
@@ -2816,22 +3232,22 @@ class MegamuLauncherApp(tk.Tk):
         if not plan:
             messagebox.showinfo(
                 "Không có ô để login",
-                "Không có cặp (tài khoản + cửa sổ + tọa độ) nào để chạy.\n"
-                "Thêm tài khoản theo thứ tự trên→dưới, hoặc mở thêm cửa sổ.",
+                f"Không có cặp (tài khoản [{auto_g}] + cửa sổ + tọa độ) nào để chạy.\n"
+                f"Thêm tài khoản vào loại [{auto_g}], hoặc mở thêm cửa sổ.",
             )
             return
 
         skip_txt = (
-            f"\nÔ để trống (không có TK): {skipped_empty}" if skipped_empty else ""
+            f"\nÔ để trống (không có TK trong [{auto_g}]): {skipped_empty}" if skipped_empty else ""
         )
         unused_txt = (
-            f"\nDòng account chưa dùng (vượt số ô/cửa sổ): {unused_accounts}"
+            f"\nDòng account [{auto_g}] chưa dùng (vượt số ô/cửa sổ): {unused_accounts}"
             if unused_accounts
             else ""
         )
         if not messagebox.askyesno(
             "Xác nhận Auto Login",
-            f"Layout {layout.get('name')}\n"
+            f"Layout {layout.get('name')}  |  Loại TK: [{auto_g}]\n"
             f"Sẽ login {len(plan)} ô: "
             + ", ".join(f"#{p['index'] + 1}={p['acc']['username']}" for p in plan)
             + skip_txt
@@ -2843,7 +3259,7 @@ class MegamuLauncherApp(tk.Tk):
         self._stop_login = False
         self.set_busy(
             True,
-            f"Auto login {len(plan)} ô (layout {layout.get('name')})...",
+            f"Auto login {len(plan)} ô (Layout {layout.get('name')}, Loại [{auto_g}])...",
         )
         self.btn_stop.configure(state="normal")
         self.iconify()
@@ -3289,8 +3705,9 @@ class MegamuLauncherApp(tk.Tk):
 
                     # Trừ 10.000.000 Zen cho tài khoản tương ứng
                     warn_msg = None
-                    if p_idx < len(self.accounts):
-                        acc = self.accounts[p_idx]
+                    active_accs = self.get_current_accounts()
+                    if p_idx < len(active_accs):
+                        acc = active_accs[p_idx]
                         cur_zen = parse_zen(acc.get("zen", 0))
                         new_zen = max(0, cur_zen - ZEN_PER_CLICK)
                         acc["zen"] = new_zen
@@ -3315,7 +3732,7 @@ class MegamuLauncherApp(tk.Tk):
 
                     # Lưu accounts định kỳ mỗi 5s
                     if time.time() - last_save_time >= 5.0:
-                        save_accounts(self.accounts)
+                        save_account_store(self.account_store)
                         last_save_time = time.time()
 
                     # ngủ theo delay, nhưng vẫn kiểm tra stop / hết giờ / phím ESC
@@ -3335,7 +3752,7 @@ class MegamuLauncherApp(tk.Tk):
                 err = str(e)
 
             try:
-                save_accounts(self.accounts)
+                save_account_store(self.account_store)
             except Exception:
                 pass
 

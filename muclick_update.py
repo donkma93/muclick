@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -24,6 +25,47 @@ API_LATEST = (
     f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
 )
 USER_AGENT = "MuClick-Updater"
+
+
+def _get_ssl_context():
+    """Tạo SSL context: ưu tiên certifi -> default -> fallback unverified để chạy được trên mọi máy."""
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        pass
+    try:
+        return ssl.create_default_context()
+    except Exception:
+        pass
+    try:
+        return ssl._create_unverified_context()
+    except Exception:
+        return None
+
+
+def _urlopen(req, timeout=30):
+    ctx = _get_ssl_context()
+    try:
+        return urllib.request.urlopen(req, timeout=timeout, context=ctx)
+    except urllib.error.URLError as e:
+        err_str = str(e).lower()
+        if "certificate" in err_str or "ssl" in err_str or "verify failed" in err_str:
+            try:
+                unverified_ctx = ssl._create_unverified_context()
+                return urllib.request.urlopen(req, timeout=timeout, context=unverified_ctx)
+            except Exception:
+                raise e
+        raise e
+    except Exception as e:
+        err_str = str(e).lower()
+        if "certificate" in err_str or "ssl" in err_str or "verify failed" in err_str:
+            try:
+                unverified_ctx = ssl._create_unverified_context()
+                return urllib.request.urlopen(req, timeout=timeout, context=unverified_ctx)
+            except Exception:
+                raise e
+        raise e
 
 
 class UpdateCheckError(Exception):
@@ -68,7 +110,7 @@ def _http_get_json(url: str, timeout=20):
             "Accept": "application/vnd.github+json",
         },
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with _urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
@@ -147,7 +189,7 @@ def download_file(url: str, dest_path: str, progress_cb=None, timeout=60):
     """Tải file; progress_cb(downloaded, total)."""
     os.makedirs(os.path.dirname(dest_path) or ".", exist_ok=True)
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with _urlopen(req, timeout=timeout) as resp:
         total = int(resp.headers.get("Content-Length") or 0)
         downloaded = 0
         chunk = 1024 * 64
