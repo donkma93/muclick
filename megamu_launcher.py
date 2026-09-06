@@ -13,6 +13,7 @@ import ctypes
 import json
 import math
 import os
+import re
 import subprocess
 import threading
 import time
@@ -256,8 +257,11 @@ POINT_LABELS = {
 LAYOUT_PRESETS = {
     "2x2": (4, 2),
     "3x2": (6, 3),
+    "4x2": (8, 4),
     "3x3": (9, 3),
     "4x3": (12, 4),
+    "4x4": (16, 4),
+    "5x3": (15, 5),
 }
 
 # Cấu hình Zen
@@ -467,6 +471,70 @@ def is_game_window(hwnd):
         or title == "Mu Online"
         or upper.startswith("MU")
     )
+
+
+def parse_game_window_title(title: str) -> dict:
+    """
+    Phân tích tiêu đề cửa sổ game MEGAMU:
+    Ví dụ: 'Cursor (800/190rr) - MEGAMU Sv1' -> Name: Cursor, Level: 800, Reset: 190, Server: MEGAMU Sv1
+    """
+    t = (title or "").strip()
+    if not t:
+        return {
+            "char_name": "",
+            "level": None,
+            "reset": None,
+            "server": "",
+            "display": "",
+            "is_in_game": False,
+        }
+
+    # Pattern 1: Name (level/reset) - Server
+    m = re.match(r"^(.+?)\s*\(\s*(\d+)\s*/\s*(\d+)\s*(?:rr|RR)?\s*\)\s*-\s*(.+)$", t)
+    if m:
+        name, lvl, rr, srv = m.groups()
+        return {
+            "char_name": name.strip(),
+            "level": int(lvl),
+            "reset": int(rr),
+            "server": srv.strip(),
+            "display": f"{name.strip()} ({lvl}/{rr}rr)",
+            "is_in_game": True,
+        }
+
+    # Pattern 2: Name (level/reset) không có server
+    m2 = re.match(r"^(.+?)\s*\(\s*(\d+)\s*/\s*(\d+)\s*(?:rr|RR)?\s*\)$", t)
+    if m2:
+        name, lvl, rr = m2.groups()
+        return {
+            "char_name": name.strip(),
+            "level": int(lvl),
+            "reset": int(rr),
+            "server": "",
+            "display": f"{name.strip()} ({lvl}/{rr}rr)",
+            "is_in_game": True,
+        }
+
+    # Pattern 3: Name - MEGAMU Server
+    m3 = re.match(r"^(.+?)\s*-\s*(MEGAMU.*)$", t, re.IGNORECASE)
+    if m3 and not m3.group(1).upper().startswith("MEGAMU"):
+        return {
+            "char_name": m3.group(1).strip(),
+            "level": None,
+            "reset": None,
+            "server": m3.group(2).strip(),
+            "display": m3.group(1).strip(),
+            "is_in_game": True,
+        }
+
+    return {
+        "char_name": "",
+        "level": None,
+        "reset": None,
+        "server": "",
+        "display": "",
+        "is_in_game": False,
+    }
 
 
 def list_game_hwnds():
@@ -1597,6 +1665,9 @@ class MegamuLauncherApp(tk.Tk):
         self.bind("<F9>", self._on_f9)
         self.bind("<Escape>", self._on_escape)
 
+        self._closing = False
+        self._title_poll_job = self.after(1000, self._poll_game_window_titles)
+
     # ----- Account group helpers -----
     def get_current_group(self):
         return self.account_group_var.get() or "Chơi game"
@@ -2078,10 +2149,18 @@ class MegamuLauncherApp(tk.Tk):
         presets = ttk.Frame(frm)
         presets.grid(row=7, column=0, columnspan=4, sticky="w", pady=(8, 0))
         ttk.Label(presets, text="Preset:").pack(side="left")
-        for label, n, c in [("2x2", 4, 2), ("3x2", 6, 3), ("3x3", 9, 3), ("4x3", 12, 4)]:
+        for label, n, c in [
+            ("2x2", 4, 2),
+            ("3x2", 6, 3),
+            ("4x2", 8, 4),
+            ("3x3", 9, 3),
+            ("4x3", 12, 4),
+            ("4x4", 16, 4),
+            ("5x3", 15, 5),
+        ]:
             ttk.Button(
-                presets, text=label, width=6, command=lambda n=n, c=c: self.apply_preset(n, c)
-            ).pack(side="left", padx=3)
+                presets, text=label, width=5, command=lambda n=n, c=c: self.apply_preset(n, c)
+            ).pack(side="left", padx=2)
 
         ttk.Label(
             frm,
@@ -2137,19 +2216,22 @@ class MegamuLauncherApp(tk.Tk):
         self.acc_group_count_lbl = ttk.Label(group_frame, text="", foreground="#055")
         self.acc_group_count_lbl.pack(side="left")
 
-        cols = ("slot", "user", "pass", "zen", "status")
+        cols = ("slot", "user", "pass", "char", "zen", "status")
         self.acc_tree = ttk.Treeview(frm, columns=cols, show="headings", height=11)
         self.acc_tree.heading("slot", text="Vị trí")
         self.acc_tree.heading("user", text="Tài khoản")
         self.acc_tree.heading("pass", text="Mật khẩu")
+        self.acc_tree.heading("char", text="Nhân vật (Lv/RR)")
         self.acc_tree.heading("zen", text="Zen hiện có")
         self.acc_tree.heading("status", text="Trạng thái")
         self.acc_tree.column("slot", width=55, anchor="center")
-        self.acc_tree.column("user", width=140)
-        self.acc_tree.column("pass", width=110)
-        self.acc_tree.column("zen", width=130, anchor="e")
-        self.acc_tree.column("status", width=120, anchor="center")
+        self.acc_tree.column("user", width=125)
+        self.acc_tree.column("pass", width=95)
+        self.acc_tree.column("char", width=175, anchor="w")
+        self.acc_tree.column("zen", width=115, anchor="e")
+        self.acc_tree.column("status", width=125, anchor="center")
         self.acc_tree.tag_configure("low_zen", foreground="#c00000")
+        self.acc_tree.tag_configure("online", foreground="#008800")
         self.acc_tree.tag_configure("normal", foreground="#000000")
         self.acc_tree.grid(row=1, column=0, columnspan=6, sticky="nsew")
         self.acc_tree.bind("<<TreeviewSelect>>", self._on_acc_select)
@@ -2200,6 +2282,7 @@ class MegamuLauncherApp(tk.Tk):
                 f"Lưu tại: {ACCOUNTS_FILE}\n"
                 "• Mỗi loại tài khoản (Chơi game, Moss...) có danh sách tài khoản riêng biệt để Auto Login.\n"
                 "• Thứ tự trên→dưới = Slot 1, Slot 2, Slot 3... tương ứng với từng điểm click trong Auto Click.\n"
+                "• Tự động nhận diện Tên nhân vật, Level, Reset và Server khi cửa sổ game đang chạy.\n"
                 "• Auto Click: Mỗi lần click trừ 10.000.000 Zen. Khi còn dưới 200.000.000 Zen hệ thống sẽ bật cảnh báo."
             ),
             foreground="#555",
@@ -2222,16 +2305,31 @@ class MegamuLauncherApp(tk.Tk):
             shown_pass = "*" * min(len(acc.get("password", "")), 12) or ""
             zen = parse_zen(acc.get("zen", 0))
             zen_txt = format_zen(zen)
-            if zen < ZEN_WARN_THRESHOLD:
+            char_info = acc.get("char_display", "")
+            if not char_info and acc.get("char_name"):
+                lvl = acc.get("char_level", "")
+                rr = acc.get("char_reset", "")
+                char_info = f"{acc['char_name']} ({lvl}/{rr}rr)"
+            if not char_info:
+                char_info = "—"
+
+            online_srv = acc.get("online_server", "")
+            if online_srv and online_srv != "Đang mở game":
+                status_txt = f"🟢 {online_srv}"
+                tag = "online"
+            elif online_srv == "Đang mở game":
+                status_txt = "🟡 Đang mở game"
+                tag = "normal"
+            elif zen < ZEN_WARN_THRESHOLD:
                 status_txt = "⚠️ < 200M Zen"
                 tag = "low_zen"
             else:
-                status_txt = "Bình thường"
+                status_txt = "Sẵn sàng"
                 tag = "normal"
             self.acc_tree.insert(
                 "",
                 "end",
-                values=(f"Slot {idx + 1}", acc.get("username", ""), shown_pass, zen_txt, status_txt),
+                values=(f"Slot {idx + 1}", acc.get("username", ""), shown_pass, char_info, zen_txt, status_txt),
                 tags=(tag,),
             )
 
@@ -2276,7 +2374,8 @@ class MegamuLauncherApp(tk.Tk):
             messagebox.showwarning("Thiếu dữ liệu", "Nhập tài khoản.")
             return
         accs = self.get_current_accounts()
-        accs[idx] = {"username": u, "password": p, "zen": z}
+        cur = accs[idx]
+        cur.update({"username": u, "password": p, "zen": z})
         save_account_store(self.account_store)
         self._refresh_group_combos()
         self._refresh_acc_tree()
@@ -2363,20 +2462,22 @@ class MegamuLauncherApp(tk.Tk):
 
         self.slot_tree = ttk.Treeview(
             mid,
-            columns=("slot", "status", "account", "password", "login"),
+            columns=("slot", "status", "char", "account", "password", "login"),
             show="headings",
             height=7,
         )
         self.slot_tree.heading("slot", text="Ô")
         self.slot_tree.heading("status", text="Trạng thái")
+        self.slot_tree.heading("char", text="Nhân vật / Game")
         self.slot_tree.heading("account", text="Account")
         self.slot_tree.heading("password", text="Password")
         self.slot_tree.heading("login", text="Login")
-        self.slot_tree.column("slot", width=40, anchor="center")
-        self.slot_tree.column("status", width=90, anchor="center")
-        self.slot_tree.column("account", width=120)
-        self.slot_tree.column("password", width=120)
-        self.slot_tree.column("login", width=120)
+        self.slot_tree.column("slot", width=35, anchor="center")
+        self.slot_tree.column("status", width=75, anchor="center")
+        self.slot_tree.column("char", width=160, anchor="w")
+        self.slot_tree.column("account", width=105)
+        self.slot_tree.column("password", width=105)
+        self.slot_tree.column("login", width=105)
         self.slot_tree.grid(row=0, column=0, columnspan=4, sticky="ew")
         self.slot_tree.bind("<<TreeviewSelect>>", self._on_slot_tree_select)
 
@@ -2538,6 +2639,14 @@ class MegamuLauncherApp(tk.Tk):
             self.slot_tree.delete(i)
         for i, slot in enumerate(layout["slots"]):
             status = "Đủ" if slot_complete(slot) else "Thiếu"
+            char_disp = "—"
+            if i < len(g_accs):
+                acc = g_accs[i]
+                char_disp = acc.get("char_display") or (
+                    f"{acc['char_name']} ({acc['char_level']}/{acc['char_reset']}rr)"
+                    if acc.get("char_name")
+                    else (f"TK: {acc.get('username')}" if acc.get("username") else "—")
+                )
             self.slot_tree.insert(
                 "",
                 "end",
@@ -2545,6 +2654,7 @@ class MegamuLauncherApp(tk.Tk):
                 values=(
                     i + 1,
                     status,
+                    char_disp,
                     self._fmt_pt(slot.get("account")),
                     self._fmt_pt(slot.get("password")),
                     self._fmt_pt(slot.get("login")),
@@ -4370,7 +4480,9 @@ class MegamuLauncherApp(tk.Tk):
         threading.Thread(target=worker, daemon=True).start()
 
     def _on_cmd_tick(self, current, total, title, cmd):
-        status_txt = f"Đang gõ lệnh [{current}/{total}] '{cmd}' → {title} (Esc để dừng)"
+        info = parse_game_window_title(title)
+        disp = info["display"] if info["is_in_game"] else title
+        status_txt = f"Đang gõ lệnh [{current}/{total}] '{cmd}' → {disp} (Esc để dừng)"
         self.status.set(status_txt)
         self.cmd_status_var.set(status_txt)
 
@@ -4378,7 +4490,60 @@ class MegamuLauncherApp(tk.Tk):
         self._stop_cmd = True
         self.status.set("Đang dừng gõ lệnh...")
 
+    def _poll_game_window_titles(self):
+        try:
+            hwnds = list_game_hwnds()
+            active_accs = self.get_current_accounts()
+            changed = False
+            for idx, hwnd in enumerate(hwnds):
+                if idx < len(active_accs):
+                    title = get_window_text(hwnd)
+                    info = parse_game_window_title(title)
+                    acc = active_accs[idx]
+                    if info["is_in_game"]:
+                        srv = info["server"] or "Online"
+                        if (
+                            acc.get("char_name") != info["char_name"]
+                            or acc.get("char_level") != info["level"]
+                            or acc.get("char_reset") != info["reset"]
+                            or acc.get("char_server") != info["server"]
+                            or acc.get("char_display") != info["display"]
+                            or acc.get("online_server") != srv
+                        ):
+                            acc["char_name"] = info["char_name"]
+                            acc["char_level"] = info["level"]
+                            acc["char_reset"] = info["reset"]
+                            acc["char_server"] = info["server"]
+                            acc["char_display"] = info["display"]
+                            acc["online_server"] = srv
+                            changed = True
+                    else:
+                        if acc.get("online_server") != "Đang mở game":
+                            acc["online_server"] = "Đang mở game"
+                            changed = True
+            for idx in range(len(hwnds), len(active_accs)):
+                if active_accs[idx].get("online_server"):
+                    active_accs[idx]["online_server"] = ""
+                    changed = True
+
+            if changed:
+                save_account_store(self.account_store)
+                self._refresh_acc_tree()
+                if hasattr(self, "slot_tree"):
+                    self._refresh_slot_ui()
+        except Exception:
+            pass
+        finally:
+            if not getattr(self, "_closing", False):
+                self._title_poll_job = self.after(1500, self._poll_game_window_titles)
+
     def on_close(self):
+        self._closing = True
+        if getattr(self, "_title_poll_job", None):
+            try:
+                self.after_cancel(self._title_poll_job)
+            except Exception:
+                pass
         self._capture_target = None
         self._wizard_queue = []
         self._stop_login = True
