@@ -235,7 +235,21 @@ def run_license_gate(root: tk.Tk) -> bool:
     """
     Kích hoạt / xác minh ONLINE (GitHub private + HWID).
     True nếu hợp lệ; False nếu user thoát.
+
+    Nếu license đã lưu còn hợp lệ, xác minh âm thầm rồi vào thẳng app.
+    Dialog chỉ hiện khi chưa có key hoặc key không thể xác minh.
     """
+    saved = load_saved_license()
+    precheck_error = ""
+    if saved and not is_admin_password(saved.get("key") or ""):
+        try:
+            root._license_info = revalidate_saved()  # type: ignore[attr-defined]
+            return True
+        except LicenseOnlineError as e:
+            precheck_error = str(e)
+        except Exception as e:
+            precheck_error = f"Lỗi: {e}"
+
     result = {"ok": False, "info": None}
     q: queue.Queue = queue.Queue()
     poll_job = {"id": None}
@@ -263,8 +277,8 @@ def run_license_gate(root: tk.Tk) -> bool:
 
     hwid_short = get_hwid()[:16] + "…"
     status = tk.StringVar(value=f"HWID máy này: {hwid_short}")
-    err_var = tk.StringVar(value="")
-    key_var = tk.StringVar(value=(load_saved_license() or {}).get("key") or "")
+    err_var = tk.StringVar(value=precheck_error)
+    key_var = tk.StringVar(value=(saved or {}).get("key") or "")
 
     ttk.Label(dlg, textvariable=status, wraplength=480, foreground="#333").pack(
         padx=16, anchor="w"
@@ -399,11 +413,6 @@ def run_license_gate(root: tk.Tk) -> bool:
     dlg.protocol("WM_DELETE_WINDOW", on_exit)
 
     poll_job["id"] = dlg.after(50, poll_queue)
-    # Chỉ auto-revalidate nếu cache không phải admin password
-    saved = load_saved_license()
-    if saved and not is_admin_password(saved.get("key") or ""):
-        dlg.after(120, lambda: run_online(prefer_saved=True))
-
     dlg.wait_window()
     stop_poll()
     if result["ok"]:

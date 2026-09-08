@@ -4,9 +4,9 @@ cd /d "%~dp0"
 
 echo === MuClick build ===
 
-REM PyInstaller phai xoa file cu truoc khi tao EXE moi. Windows khong cho
-REM xoa khi MuClick.exe dang chay, nen dung som voi thong bao de hieu.
-tasklist /FI "IMAGENAME eq MuClick.exe" /NH | findstr /I /C:"MuClick.exe" >nul
+REM PyInstaller phai xoa file cu truoc khi tao EXE moi. Chi dung build neu
+REM DUNG file dich dist\MuClick.exe dang chay; ban copy o noi khac thi khong can chan.
+powershell -NoProfile -Command "$target = Join-Path (Get-Location) 'dist\MuClick.exe'; $found = Get-Process -Name MuClick -ErrorAction SilentlyContinue | Where-Object { $_.Path -ieq $target }; if ($found) { exit 0 } else { exit 1 }" >nul 2>&1
 if not errorlevel 1 (
   echo.
   echo [ERROR] MuClick.exe dang chay va dang khoa dist\MuClick.exe.

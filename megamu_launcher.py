@@ -28,7 +28,6 @@ from muclick_gates import (
     is_admin_password,
     run_admin_license_dialog,
     run_license_gate,
-    run_update_gate,
 )
 from muclick_paths import APP_VERSION, data_path, install_dir, migrate_user_files
 
@@ -4974,13 +4973,11 @@ class MegamuLauncherApp(tk.Tk):
 
 def main():
     enable_per_monitor_dpi_awareness()
-    # Root ẩn cho các gate (update → license), rồi mở app chính.
+    # Root ẩn chỉ dùng cho bước xác minh license, rồi mở app chính.
+    # Không kiểm tra cập nhật khi khởi động để cửa sổ app xuất hiện ngay.
     boot = tk.Tk()
     boot.withdraw()
     try:
-        if not run_update_gate(boot):
-            boot.destroy()
-            return
         if not run_license_gate(boot):
             boot.destroy()
             return
