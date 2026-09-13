@@ -10,10 +10,12 @@ MEGAMU Multi-Account Launcher
 from __future__ import annotations
 
 import ctypes
+import base64
 import json
 import math
 import os
 import re
+import statistics
 import subprocess
 import threading
 import time
@@ -67,11 +69,12 @@ HWND_TOP = 0
 
 INPUT_MOUSE = 0
 INPUT_KEYBOARD = 1
+PT_TOUCH = 0x00000002
 MOUSEEVENTF_MOVE = 0x0001
 MOUSEEVENTF_LEFTDOWN = 0x0002
 MOUSEEVENTF_LEFTUP = 0x0004
-MOUSEEVENTF_ABSOLUTE = 0x8000
 MOUSEEVENTF_VIRTUALDESK = 0x4000
+MOUSEEVENTF_ABSOLUTE = 0x8000
 KEYEVENTF_KEYUP = 0x0002
 KEYEVENTF_UNICODE = 0x0004
 VK_CONTROL = 0x11
@@ -93,15 +96,47 @@ KEYEVENTF_EXTENDEDKEY = 0x0001
 CF_UNICODETEXT = 13
 GMEM_MOVEABLE = 0x0002
 WM_CHAR = 0x0102
+WM_MOUSEMOVE = 0x0200
 WM_LBUTTONDOWN = 0x0201
 WM_LBUTTONUP = 0x0202
 MK_LBUTTON = 0x0001
+SMTO_ABORTIFHUNG = 0x0002
+CLICK_MODE_HARDWARE = "hardware"
+CLICK_MODE_RESTORE = "restore"
+CLICK_MODE_WINDOW = "window"
+CLICK_MODE_TOUCH = "touch"
+CLICK_MODE_FAST = "fast"
+CLICK_MODE_TURBO = "turbo"
+CLICK_MODES = (
+    CLICK_MODE_HARDWARE,
+    CLICK_MODE_RESTORE,
+    CLICK_MODE_WINDOW,
+    CLICK_MODE_TOUCH,
+    CLICK_MODE_FAST,
+)
+CLICK_MODE_LABELS = {
+    CLICK_MODE_HARDWARE: "Chuột hệ thống — lần lượt, chiếm chuột",
+    CLICK_MODE_RESTORE: "Trả chuột — đúng ô đã chọn (lần lượt)",
+    CLICK_MODE_WINDOW: "Message nền — thử nghiệm (Unity thường bỏ qua)",
+    CLICK_MODE_TOUCH: "Chạm đa điểm — đồng thời, không chiếm chuột",
+    CLICK_MODE_FAST: "Chuột chuẩn nhanh — tuần tự, trả chuột sau cả đợt",
+    CLICK_MODE_TURBO: "Chuột turbo — không khuyến nghị cho Unity",
+}
 EXTENDED_VKS = {VK_HOME, VK_END, 0x25, 0x26, 0x27, 0x28, 0x2D, 0x2E}  # arrows/ins/del
 SM_XVIRTUALSCREEN = 76
 SM_YVIRTUALSCREEN = 77
 SM_CXVIRTUALSCREEN = 78
 SM_CYVIRTUALSCREEN = 79
 MONITORINFOF_PRIMARY = 0x00000001
+TOUCH_FEEDBACK_NONE = 0x00000003
+POINTER_FLAG_INRANGE = 0x00000002
+POINTER_FLAG_INCONTACT = 0x00000004
+POINTER_FLAG_PRIMARY = 0x00002000
+POINTER_FLAG_DOWN = 0x00010000
+POINTER_FLAG_UP = 0x00040000
+TOUCH_MASK_CONTACTAREA = 0x00000001
+TOUCH_MASK_ORIENTATION = 0x00000002
+TOUCH_MASK_PRESSURE = 0x00000004
 
 UNITY_CLASS = "UnityWndClass"
 MEGAMU_PROCESS_NAMES = ("MEGAMU.exe", "Dashboard.exe")
@@ -114,6 +149,7 @@ migrate_user_files(
         "autoclick_points.json",
         "app_settings.json",
         "commands.json",
+        "dashboard_snapshots.json",
     )
 )
 ACCOUNTS_FILE = data_path("accounts.json")
@@ -121,6 +157,7 @@ COORDS_FILE = data_path("click_coords.json")
 AUTOCLICK_FILE = data_path("autoclick_points.json")
 SETTINGS_FILE = data_path("app_settings.json")
 COMMANDS_FILE = data_path("commands.json")
+DASHBOARD_SNAPSHOTS_FILE = data_path("dashboard_snapshots.json")
 
 
 def load_app_settings() -> dict:
@@ -313,6 +350,39 @@ class INPUT(ctypes.Structure):
     _fields_ = [("type", wintypes.DWORD), ("union", INPUT_UNION)]
 
 
+class POINTER_INFO(ctypes.Structure):
+    _fields_ = [
+        ("pointerType", wintypes.DWORD),
+        ("pointerId", wintypes.UINT),
+        ("frameId", wintypes.UINT),
+        ("pointerFlags", wintypes.DWORD),
+        ("sourceDevice", wintypes.HANDLE),
+        ("hwndTarget", wintypes.HWND),
+        ("ptPixelLocation", POINT),
+        ("ptHimetricLocation", POINT),
+        ("ptPixelLocationRaw", POINT),
+        ("ptHimetricLocationRaw", POINT),
+        ("dwTime", wintypes.DWORD),
+        ("historyCount", wintypes.UINT),
+        ("InputData", ctypes.c_int32),
+        ("dwKeyStates", wintypes.DWORD),
+        ("PerformanceCount", ctypes.c_ulonglong),
+        ("ButtonChangeType", wintypes.DWORD),
+    ]
+
+
+class POINTER_TOUCH_INFO(ctypes.Structure):
+    _fields_ = [
+        ("pointerInfo", POINTER_INFO),
+        ("touchFlags", wintypes.DWORD),
+        ("touchMask", wintypes.DWORD),
+        ("rcContact", wintypes.RECT),
+        ("rcContactRaw", wintypes.RECT),
+        ("orientation", wintypes.DWORD),
+        ("pressure", wintypes.DWORD),
+    ]
+
+
 class MONITORINFOEXW(ctypes.Structure):
     _fields_ = [
         ("cbSize", wintypes.DWORD),
@@ -339,6 +409,59 @@ user32.EnumDisplayMonitors.argtypes = [
 user32.EnumDisplayMonitors.restype = wintypes.BOOL
 user32.GetMonitorInfoW.argtypes = [wintypes.HANDLE, ctypes.POINTER(MONITORINFOEXW)]
 user32.GetMonitorInfoW.restype = wintypes.BOOL
+user32.MonitorFromPoint.argtypes = [POINT, wintypes.DWORD]
+user32.MonitorFromPoint.restype = wintypes.HANDLE
+user32.GetCursorPos.argtypes = [ctypes.POINTER(POINT)]
+user32.GetCursorPos.restype = wintypes.BOOL
+user32.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
+user32.SetCursorPos.restype = wintypes.BOOL
+user32.WindowFromPoint.argtypes = [POINT]
+user32.WindowFromPoint.restype = wintypes.HWND
+user32.GetParent.argtypes = [wintypes.HWND]
+user32.GetParent.restype = wintypes.HWND
+user32.PostMessageW.argtypes = [
+    wintypes.HWND,
+    wintypes.UINT,
+    wintypes.WPARAM,
+    wintypes.LPARAM,
+]
+user32.PostMessageW.restype = wintypes.BOOL
+user32.SendMessageTimeoutW.argtypes = [
+    wintypes.HWND,
+    wintypes.UINT,
+    wintypes.WPARAM,
+    wintypes.LPARAM,
+    wintypes.UINT,
+    wintypes.UINT,
+    ctypes.POINTER(ctypes.c_ulonglong),
+]
+user32.SendMessageTimeoutW.restype = ctypes.c_size_t
+user32.ScreenToClient.argtypes = [wintypes.HWND, ctypes.POINTER(POINT)]
+user32.ScreenToClient.restype = wintypes.BOOL
+user32.ClientToScreen.argtypes = [wintypes.HWND, ctypes.POINTER(POINT)]
+user32.ClientToScreen.restype = wintypes.BOOL
+user32.GetClientRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+user32.GetClientRect.restype = wintypes.BOOL
+user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+user32.GetWindowRect.restype = wintypes.BOOL
+user32.IsWindow.argtypes = [wintypes.HWND]
+user32.IsWindow.restype = wintypes.BOOL
+user32.IsWindowVisible.argtypes = [wintypes.HWND]
+user32.IsWindowVisible.restype = wintypes.BOOL
+user32.EnumChildWindows.argtypes = [wintypes.HWND, EnumWindowsProc, wintypes.LPARAM]
+user32.EnumChildWindows.restype = wintypes.BOOL
+user32.ChildWindowFromPointEx.argtypes = [wintypes.HWND, POINT, wintypes.UINT]
+user32.ChildWindowFromPointEx.restype = wintypes.HWND
+user32.InitializeTouchInjection.argtypes = [wintypes.UINT, wintypes.DWORD]
+user32.InitializeTouchInjection.restype = wintypes.BOOL
+user32.InjectTouchInput.argtypes = [
+    wintypes.UINT,
+    ctypes.POINTER(POINTER_TOUCH_INFO),
+]
+user32.InjectTouchInput.restype = wintypes.BOOL
+
+_touch_injection_lock = threading.Lock()
+_touch_injection_initialized = False
 
 
 # ---------------------------------------------------------------------------
@@ -383,6 +506,37 @@ def list_display_monitors():
     # Thứ tự trực quan giúp việc phân bổ cửa sổ luôn ổn định.
     monitors.sort(key=lambda m: (m["monitor"][1], m["monitor"][0], m["device"]))
     return monitors
+
+
+def monitor_device_from_point(x, y):
+    hmon = user32.MonitorFromPoint(POINT(int(x), int(y)), 2)  # MONITOR_DEFAULTTONEAREST
+    if not hmon:
+        return ""
+    info = MONITORINFOEXW()
+    info.cbSize = ctypes.sizeof(info)
+    if user32.GetMonitorInfoW(hmon, ctypes.byref(info)):
+        return info.szDevice or ""
+    return ""
+
+
+def _hwnd_contains_screen(hwnd, x, y):
+    if not hwnd:
+        return False
+    left, top, w, ht = get_window_rect(hwnd)
+    return left <= int(x) < left + w and top <= int(y) < top + ht
+
+
+def hwnd_index_containing(hwnds, x, y, hwnd_hint=None):
+    """Chỉ gắn điểm với cửa sổ THỰC SỰ chứa pixel đã click."""
+    x, y = int(x), int(y)
+    if hwnd_hint and _hwnd_contains_screen(hwnd_hint, x, y):
+        for i, h in enumerate(hwnds or []):
+            if h == hwnd_hint:
+                return i, h
+    for i, h in enumerate(hwnds or []):
+        if _hwnd_contains_screen(h, x, y):
+            return i, h
+    return None, None
 
 
 def monitor_label(monitor):
@@ -455,6 +609,131 @@ def client_to_screen(hwnd, x, y):
     pt = POINT(int(x), int(y))
     user32.ClientToScreen(hwnd, ctypes.byref(pt))
     return pt.x, pt.y
+
+
+def get_cursor_pos():
+    pt = POINT()
+    if not user32.GetCursorPos(ctypes.byref(pt)):
+        return None
+    return pt.x, pt.y
+
+
+def normalize_click_mode(mode):
+    value = str(mode or "").strip().lower()
+    if value == CLICK_MODE_TURBO:
+        return CLICK_MODE_FAST
+    if value in CLICK_MODES:
+        return value
+    return CLICK_MODE_HARDWARE
+
+
+def _mouse_lparam(cx, cy):
+    return wintypes.LPARAM(((int(cy) & 0xFFFF) << 16) | (int(cx) & 0xFFFF))
+
+
+def _send_timeout(hwnd, msg, wparam, lparam, timeout_ms=80):
+    result = ctypes.c_ulonglong(0)
+    return bool(
+        user32.SendMessageTimeoutW(
+            hwnd,
+            msg,
+            wparam,
+            lparam,
+            SMTO_ABORTIFHUNG,
+            timeout_ms,
+            ctypes.byref(result),
+        )
+    )
+
+
+def _is_same_or_parent(hwnd, ancestor):
+    cur = hwnd
+    seen = set()
+    while cur and cur not in seen:
+        if cur == ancestor:
+            return True
+        seen.add(cur)
+        cur = user32.GetParent(cur)
+    return False
+
+
+def game_hwnd_from_point(x, y):
+    """Cửa sổ MEGAMU chứa tọa độ màn hình; không di chuyển chuột."""
+    x, y = int(x), int(y)
+    hit = user32.WindowFromPoint(POINT(x, y))
+    cur = hit
+    seen = set()
+    while cur and cur not in seen:
+        if is_game_window(cur) or get_class_name(cur) == UNITY_CLASS:
+            return cur
+        seen.add(cur)
+        cur = user32.GetParent(cur)
+    for hwnd in list_game_hwnds():
+        left, top, w, h = get_window_rect(hwnd)
+        if left <= x < left + w and top <= y < top + h:
+            return hwnd
+    return hit or None
+
+
+def _prepare_window_click(hwnd, x, y, cx=None, cy=None):
+    """Chuẩn bị click nền cho chính cửa sổ Unity đã được setup.
+
+    ``WM_LBUTTON*`` mang tọa độ theo client area của *cửa sổ nhận message*.
+    Điểm Auto Click được lưu theo client area của ``hwnd`` (UnityWndClass), vì
+    vậy không được tìm rồi chuyển message xuống một cửa sổ con: Unity xử lý
+    input ở cửa sổ gốc và việc đổi target làm lệch hệ tọa độ trên một số màn.
+    """
+    if not hwnd or not user32.IsWindow(hwnd):
+        return None
+    if cx is None or cy is None:
+        cx, cy = screen_to_client(hwnd, int(x), int(y))
+    return hwnd, _mouse_lparam(int(cx), int(cy))
+
+
+def _post_mouse_down(target, lp):
+    user32.PostMessageW(target, WM_MOUSEMOVE, 0, lp)
+    user32.PostMessageW(target, WM_LBUTTONDOWN, MK_LBUTTON, lp)
+
+
+def _post_mouse_up(target, lp):
+    user32.PostMessageW(target, WM_LBUTTONUP, 0, lp)
+
+
+def mouse_click_window_message(hwnd, x, y):
+    """Click bằng WM_LBUTTON, không chiếm chuột hệ thống."""
+    prepared = _prepare_window_click(hwnd, x, y)
+    if not prepared:
+        return False
+    target, lp = prepared
+    _post_mouse_down(target, lp)
+    time.sleep(0.04)
+    _post_mouse_up(target, lp)
+    return True
+
+
+def click_points_parallel(targets):
+    """
+    Gửi click đồng thời, mỗi phần tử là (hwnd, x, y) của ĐÚNG cửa sổ đó.
+    Không dùng một điểm chung cho mọi màn.
+    """
+    prepared = []
+    for item in targets or []:
+        if not item:
+            continue
+        hwnd, x, y = item[0], item[1], item[2]
+        cx = item[3] if len(item) > 3 else None
+        cy = item[4] if len(item) > 4 else None
+        ready = _prepare_window_click(hwnd, x, y, cx, cy)
+        if ready:
+            prepared.append(ready)
+    if not prepared:
+        return 0
+    for target, lp in prepared:
+        _post_mouse_down(target, lp)
+    time.sleep(0.05)
+    for target, lp in prepared:
+        _post_mouse_up(target, lp)
+    return len(prepared)
 
 
 def is_game_window(hwnd):
@@ -551,7 +830,9 @@ def capture_window_bgr(hwnd):
     if w <= 0 or h <= 0:
         return None
 
-    pt = wintypes.POINT(0, 0)
+    # ClientToScreen đã khai báo nhận cấu trúc POINT nội bộ của module.
+    # Không dùng wintypes.POINT ở đây vì ctypes sẽ từ chối pointer khác kiểu.
+    pt = POINT(0, 0)
     user32.ClientToScreen(hwnd, ctypes.byref(pt))
     sx, sy = pt.x, pt.y
 
@@ -997,33 +1278,261 @@ def _send_input(*inputs):
     return user32.SendInput(n, ctypes.byref(arr), ctypes.sizeof(INPUT)) == n
 
 
-def mouse_click_screen(x, y, settle=0.12, hwnd=None):
-    """Click thật bằng SetCursorPos + SendInput (Unity cần input thật, không dùng PostMessage)."""
+def capture_screen_point(x, y, hwnds=None):
+    """Ghi đúng pixel đã click trên cửa sổ chứa điểm đó."""
     x, y = int(x), int(y)
+    pt = {"x": x, "y": y}
+    slot, hwnd = hwnd_index_containing(hwnds or [], x, y)
+    if hwnd is None:
+        hint = window_at_point(x, y) or game_hwnd_from_point(x, y)
+        slot, hwnd = hwnd_index_containing(hwnds or [], x, y, hint)
+        if hwnd is None:
+            hwnd = hint
+    if slot is not None:
+        pt["slot"] = int(slot)
+    mon = monitor_device_from_point(x, y)
+    if mon:
+        pt["monitor"] = mon
+    if hwnd and user32.IsWindow(hwnd):
+        cx, cy = screen_to_client(hwnd, x, y)
+        cw, ch = get_client_size(hwnd)
+        pt["cx"] = int(cx)
+        pt["cy"] = int(cy)
+        if cw > 0 and ch > 0:
+            pt["cw"] = int(cw)
+            pt["ch"] = int(ch)
+            pt["rx"] = cx / cw
+            pt["ry"] = cy / ch
+    return pt
+
+
+def resolve_bound_hwnd(pt, hwnds=None, fallback_index=None):
+    hwnds = list(hwnds or [])
+    hwnd = None
+    slot = pt.get("slot")
+    if isinstance(slot, int) and 0 <= slot < len(hwnds):
+        hwnd = hwnds[slot]
+    if hwnd is None:
+        _, hwnd = hwnd_index_containing(hwnds, int(pt.get("x", 0)), int(pt.get("y", 0)))
+    if hwnd is None and fallback_index is not None and 0 <= int(fallback_index) < len(hwnds):
+        hwnd = hwnds[int(fallback_index)]
+    if hwnd is None:
+        hwnd = window_at_point(int(pt.get("x", 0)), int(pt.get("y", 0))) or game_hwnd_from_point(
+            int(pt.get("x", 0)), int(pt.get("y", 0))
+        )
+    return hwnd
+
+
+def resolve_screen_point(pt, hwnds=None, fallback_index=None):
+    """
+    Trả ((sx,sy), hwnd, cx, cy).
+    Ưu tiên pixel client đã ghi (cx,cy) trên đúng cửa sổ, không nhân rx/ry lại.
+    """
+    if not isinstance(pt, dict):
+        raise ValueError("Điểm click không hợp lệ")
+    hwnd = resolve_bound_hwnd(pt, hwnds=hwnds, fallback_index=fallback_index)
+    sx, sy = int(pt["x"]), int(pt["y"])
+    cx = cy = None
+    if hwnd:
+        cw, ch = get_client_size(hwnd)
+        saved_cx, saved_cy = pt.get("cx"), pt.get("cy")
+        saved_cw, saved_ch = pt.get("cw"), pt.get("ch")
+        if saved_cx is not None and saved_cy is not None and saved_cw == cw and saved_ch == ch:
+            cx, cy = int(saved_cx), int(saved_cy)
+        elif pt.get("rx") is not None and pt.get("ry") is not None and cw > 0 and ch > 0:
+            cx = int(round(float(pt["rx"]) * cw))
+            cy = int(round(float(pt["ry"]) * ch))
+        elif saved_cx is not None and saved_cy is not None:
+            cx, cy = int(saved_cx), int(saved_cy)
+        if cx is not None and cy is not None:
+            sx, sy = client_to_screen(hwnd, cx, cy)
+    return (sx, sy), hwnd, cx, cy
+
+
+def create_common_point_diagnostic(points, hwnds=None, output_file=None):
+    """Chụp vùng quanh một điểm client chung trên mọi cửa sổ game.
+
+    Đây chỉ là phép thử nhận diện: không gửi click.  Điểm chung được lấy bằng
+    trung vị của các điểm đã setup, theo tỉ lệ client area, nên mỗi cửa sổ có
+    tọa độ màn hình riêng nhưng cùng vị trí UI.
+    """
+    points = list(points or [])
+    hwnds = list(hwnds or [])
+    if not points:
+        raise ValueError("Chưa có điểm setup để tạo chẩn đoán")
+    if not hwnds:
+        raise ValueError("Không tìm thấy cửa sổ game đang chọn")
+
+    ratios = []
+    for i, pt in enumerate(points):
+        (_sx, _sy), hwnd, cx, cy = resolve_screen_point(
+            pt, hwnds=hwnds, fallback_index=i
+        )
+        if not hwnd:
+            continue
+        cw, ch = get_client_size(hwnd)
+        if cw <= 0 or ch <= 0:
+            continue
+        if cx is None or cy is None:
+            cx, cy = screen_to_client(hwnd, int(pt["x"]), int(pt["y"]))
+        ratios.append((float(cx) / cw, float(cy) / ch))
+    if not ratios:
+        raise ValueError("Không thể quy đổi điểm setup về client area")
+
+    rx = statistics.median(value[0] for value in ratios)
+    ry = statistics.median(value[1] for value in ratios)
+    crop_w, crop_h = 220, 150
+    label_h, gap, cols = 34, 12, 3
+    rows = max(1, math.ceil(len(hwnds) / cols))
+    sheet_w = gap + cols * (crop_w + gap)
+    sheet_h = gap + rows * (label_h + crop_h + gap)
+    sheet = np.full((sheet_h, sheet_w, 3), 28, dtype=np.uint8)
+    targets = []
+
+    for index, hwnd in enumerate(hwnds):
+        cw, ch = get_client_size(hwnd)
+        cx = max(0, min(max(0, cw - 1), int(round(rx * cw))))
+        cy = max(0, min(max(0, ch - 1), int(round(ry * ch))))
+        sx, sy = client_to_screen(hwnd, cx, cy)
+        targets.append(
+            {"slot": index + 1, "hwnd": int(hwnd), "cx": cx, "cy": cy, "x": sx, "y": sy}
+        )
+
+        image = capture_window_bgr(hwnd)
+        patch = np.full((crop_h, crop_w, 3), 0, dtype=np.uint8)
+        if image is not None:
+            left = cx - crop_w // 2
+            top = cy - crop_h // 2
+            src_left, src_top = max(0, left), max(0, top)
+            src_right = min(image.shape[1], left + crop_w)
+            src_bottom = min(image.shape[0], top + crop_h)
+            if src_right > src_left and src_bottom > src_top:
+                dst_left, dst_top = src_left - left, src_top - top
+                patch[
+                    dst_top:dst_top + (src_bottom - src_top),
+                    dst_left:dst_left + (src_right - src_left),
+                ] = image[src_top:src_bottom, src_left:src_right]
+            marker = (cx - left, cy - top)
+            cv2.drawMarker(
+                patch, marker, (0, 0, 255), cv2.MARKER_CROSS, 24, 2, cv2.LINE_AA
+            )
+
+        row, col = divmod(index, cols)
+        x0 = gap + col * (crop_w + gap)
+        y0 = gap + row * (label_h + crop_h + gap)
+        cv2.putText(
+            sheet,
+            f"Cua so {index + 1}  client {cx},{cy}",
+            (x0, y0 + 22),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.48,
+            (235, 235, 235),
+            1,
+            cv2.LINE_AA,
+        )
+        sheet[y0 + label_h:y0 + label_h + crop_h, x0:x0 + crop_w] = patch
+
+    if output_file is None:
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        output_file = data_path(f"common_point_diagnostic_{stamp}.png")
+    if not cv2.imwrite(str(output_file), sheet):
+        raise RuntimeError("Không lưu được ảnh chẩn đoán điểm chung")
+    return {"file": str(output_file), "rx": rx, "ry": ry, "targets": targets}
+
+
+def inject_touch_clicks_parallel(screen_points, hold_ms=65):
+    """Gửi một frame chạm đa điểm thật của Windows, không dùng con trỏ chuột.
+
+    Windows hit-test từng tiếp điểm ở tọa độ màn hình tương ứng.  Một lần gọi
+    ``InjectTouchInput`` chứa toàn bộ các tiếp điểm DOWN, do đó khác với vòng
+    lặp SetCursorPos/SendInput vốn chỉ có một chuột hệ thống.
+    """
+    global _touch_injection_initialized
+    points = [(int(x), int(y)) for x, y in (screen_points or [])]
+    if not points:
+        return 0
+    if len(points) > 16:
+        raise ValueError("Thử nghiệm touch hiện hỗ trợ tối đa 16 điểm cùng lúc")
+
+    vx, vy, vw, vh = get_virtual_screen_bounds()
+    for x, y in points:
+        if not (vx <= x < vx + vw and vy <= y < vy + vh):
+            raise ValueError(f"Điểm touch nằm ngoài desktop ảo: ({x}, {y})")
+
+    def make_frame(is_down):
+        contacts = (POINTER_TOUCH_INFO * len(points))()
+        for index, (x, y) in enumerate(points):
+            contact = contacts[index]
+            info = contact.pointerInfo
+            info.pointerType = PT_TOUCH
+            # Touch injection dùng ID từ 0 và frame UP chỉ mang cờ UP.
+            # Giữ đúng chuỗi trạng thái trong sample chính thức của Microsoft.
+            info.pointerId = index
+            info.pointerFlags = (
+                (POINTER_FLAG_DOWN | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT)
+                if is_down
+                else POINTER_FLAG_UP
+            )
+            info.ptPixelLocation = POINT(x, y)
+            contact.touchMask = (
+                TOUCH_MASK_CONTACTAREA | TOUCH_MASK_ORIENTATION | TOUCH_MASK_PRESSURE
+            )
+            contact.rcContact = wintypes.RECT(x - 2, y - 2, x + 2, y + 2)
+            # rcContactRaw chỉ dành cho dữ liệu cảm biến thô.  Sample chính
+            # thức của Microsoft không thiết lập nó; gửi giá trị này trong
+            # touch injection làm Windows 11 trả ERROR_INVALID_PARAMETER trên
+            # một số desktop đa màn hình.
+            contact.orientation = 90
+            contact.pressure = 32000
+        return contacts
+
+    with _touch_injection_lock:
+        if not _touch_injection_initialized:
+            if not user32.InitializeTouchInjection(16, TOUCH_FEEDBACK_NONE):
+                raise OSError("Windows không khởi tạo được touch injection")
+            _touch_injection_initialized = True
+
+        down = make_frame(True)
+        if not user32.InjectTouchInput(len(down), down):
+            raise OSError("Windows từ chối frame touch DOWN")
+        try:
+            time.sleep(max(0.01, float(hold_ms) / 1000.0))
+        finally:
+            up = make_frame(False)
+            if not user32.InjectTouchInput(len(up), up):
+                raise OSError("Windows từ chối frame touch UP")
+    return len(points)
+
+
+def mouse_click_screen(x, y, settle=0.12, hwnd=None, mode=CLICK_MODE_HARDWARE):
+    """
+    Click theo mode:
+      hardware — SetCursorPos + SendInput (chiếm chuột, Unity nhận tốt nhất)
+      restore  — click thật rồi trả con trỏ về chỗ cũ
+      window   — Post/SendMessage vào HWND, không di chuyển chuột (Unity thường bỏ qua)
+    """
+    x, y = int(x), int(y)
+    mode = normalize_click_mode(mode)
+
+    if mode == CLICK_MODE_WINDOW:
+        target = hwnd if hwnd and user32.IsWindow(hwnd) else game_hwnd_from_point(x, y)
+        mouse_click_window_message(target, x, y)
+        return
+
+    saved = get_cursor_pos() if mode == CLICK_MODE_RESTORE else None
     if hwnd and user32.IsWindow(hwnd) and user32.GetForegroundWindow() != hwnd:
         focus_window(hwnd)
         time.sleep(0.05)
+    # Đặt chuột bằng SetCursorPos (cùng hệ tọa độ lúc ghi điểm).
+    # Không SendInput ABSOLUTE — remap 0..65535 dễ lệch trên nhiều màn / DPI.
+    hold = max(0.10, float(settle or 0.10))
     user32.SetCursorPos(x, y)
-    time.sleep(settle)
-    vx, vy, vw, vh = get_virtual_screen_bounds()
-    abs_x = int((x - vx) * 65535 / max(vw - 1, 1))
-    abs_y = int((y - vy) * 65535 / max(vh - 1, 1))
-    abs_x = max(0, min(65535, abs_x))
-    abs_y = max(0, min(65535, abs_y))
+    time.sleep(hold)
+    cur = get_cursor_pos()
+    if cur is not None and (cur[0] != x or cur[1] != y):
+        user32.SetCursorPos(x, y)
+        time.sleep(0.03)
     extra = ctypes.pointer(ctypes.c_ulong(0))
-    move = INPUT(
-        type=INPUT_MOUSE,
-        union=INPUT_UNION(
-            mi=MOUSEINPUT(
-                abs_x,
-                abs_y,
-                0,
-                MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
-                0,
-                extra,
-            )
-        ),
-    )
     down = INPUT(
         type=INPUT_MOUSE,
         union=INPUT_UNION(mi=MOUSEINPUT(0, 0, 0, MOUSEEVENTF_LEFTDOWN, 0, extra)),
@@ -1032,12 +1541,123 @@ def mouse_click_screen(x, y, settle=0.12, hwnd=None):
         type=INPUT_MOUSE,
         union=INPUT_UNION(mi=MOUSEINPUT(0, 0, 0, MOUSEEVENTF_LEFTUP, 0, extra)),
     )
-    _send_input(move)
-    time.sleep(0.02)
     _send_input(down)
-    time.sleep(0.04)
+    time.sleep(0.05)
     _send_input(up)
-    time.sleep(0.08)
+    time.sleep(hold)
+    if saved is not None:
+        user32.SetCursorPos(int(saved[0]), int(saved[1]))
+        time.sleep(0.02)
+
+
+def _short_precise_wait(seconds):
+    """Chờ rất ngắn mà không bị Windows làm tròn sleep thành ~15 ms."""
+    seconds = max(0.0, float(seconds))
+    if seconds <= 0:
+        return
+    deadline = time.perf_counter() + seconds
+    if seconds > 0.020:
+        time.sleep(max(0.0, seconds - 0.002))
+    while time.perf_counter() < deadline:
+        pass
+
+
+def click_points_fast_sequential(
+    targets, move_settle_ms=18, press_ms=12, gap_ms=2, restore_cursor=True
+):
+    """Click thật từng điểm với độ trễ thấp, rồi mới trả con trỏ về.
+
+    Windows chỉ có một con trỏ chuột nên không thể tạo click chuột vật lý đồng
+    thời cho nhiều cửa sổ. Hàm này bỏ toàn bộ thao tác focus/settle tốn thời
+    gian của chế độ click thường: mỗi điểm được SetCursorPos rồi SendInput
+    down/up trực tiếp. Với cấu hình mặc định, một đợt 6 game mất xấp xỉ 60 ms.
+    """
+    points = [(int(item[1]), int(item[2])) for item in (targets or []) if item]
+    if not points:
+        return 0
+    move_settle_seconds = max(0.008, float(move_settle_ms) / 1000.0)
+    press_seconds = max(0.006, float(press_ms) / 1000.0)
+    gap_seconds = max(0.0, float(gap_ms) / 1000.0)
+    saved = get_cursor_pos() if restore_cursor else None
+    extra = ctypes.pointer(ctypes.c_ulong(0))
+    down = INPUT(
+        type=INPUT_MOUSE,
+        union=INPUT_UNION(mi=MOUSEINPUT(0, 0, 0, MOUSEEVENTF_LEFTDOWN, 0, extra)),
+    )
+    up = INPUT(
+        type=INPUT_MOUSE,
+        union=INPUT_UNION(mi=MOUSEINPUT(0, 0, 0, MOUSEEVENTF_LEFTUP, 0, extra)),
+    )
+    completed = 0
+    try:
+        for x, y in points:
+            if not user32.SetCursorPos(x, y):
+                continue
+            _short_precise_wait(move_settle_seconds)
+            _send_input(down)
+            _short_precise_wait(press_seconds)
+            _send_input(up)
+            completed += 1
+            if gap_seconds:
+                _short_precise_wait(gap_seconds)
+    finally:
+        if saved is not None:
+            user32.SetCursorPos(int(saved[0]), int(saved[1]))
+    return completed
+
+
+def click_points_turbo_sequential(targets, restore_cursor=True):
+    """Xếp toàn bộ click thật vào một SendInput, vẫn đúng thứ tự từng điểm.
+
+    Đây không phải click đồng thời: Windows xử lý các event theo chuỗi đã xếp.
+    Khác biệt là cả chuỗi move/down/up chỉ qua một lần gọi kernel, tránh độ trễ
+    giữa sáu lần gọi SendInput. Phù hợp khi game nhận click ngắn bình thường.
+    """
+    points = [(int(item[1]), int(item[2])) for item in (targets or []) if item]
+    if not points:
+        return 0
+    vx, vy, vw, vh = get_virtual_screen_bounds()
+    if vw <= 1 or vh <= 1:
+        raise RuntimeError("Kích thước desktop ảo không hợp lệ")
+    saved = get_cursor_pos() if restore_cursor else None
+    extra = ctypes.pointer(ctypes.c_ulong(0))
+
+    def move_input(x, y):
+        if not (vx <= x < vx + vw and vy <= y < vy + vh):
+            raise ValueError(f"Điểm click nằm ngoài desktop ảo: ({x}, {y})")
+        dx = int(round((x - vx) * 65535 / (vw - 1)))
+        dy = int(round((y - vy) * 65535 / (vh - 1)))
+        return INPUT(
+            type=INPUT_MOUSE,
+            union=INPUT_UNION(
+                mi=MOUSEINPUT(
+                    dx, dy, 0,
+                    MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
+                    0, extra,
+                )
+            ),
+        )
+
+    events = []
+    for x, y in points:
+        events.extend((
+            move_input(x, y),
+            INPUT(type=INPUT_MOUSE, union=INPUT_UNION(
+                mi=MOUSEINPUT(0, 0, 0, MOUSEEVENTF_LEFTDOWN, 0, extra)
+            )),
+            INPUT(type=INPUT_MOUSE, union=INPUT_UNION(
+                mi=MOUSEINPUT(0, 0, 0, MOUSEEVENTF_LEFTUP, 0, extra)
+            )),
+        ))
+    if saved is not None:
+        events.append(move_input(int(saved[0]), int(saved[1])))
+    if not _send_input(*events):
+        raise OSError("Windows không nhận đủ chuỗi click turbo")
+    # Absolute mouse có lượng tử hóa 0..65535 nên có thể lệch 1 px trên màn
+    # hình lớn; chỉnh lại chính xác sau khi hàng đợi đã được nhận.
+    if saved is not None:
+        user32.SetCursorPos(int(saved[0]), int(saved[1]))
+    return len(points)
 
 
 def key_vk(vk, down=True):
@@ -1548,6 +2168,103 @@ def get_saved_account_usernames():
     return names
 
 
+def default_dashboard_snapshots_store():
+    """Kho lưu bản chụp Dashboard theo từng loại tài khoản."""
+    return {"version": 1, "snapshots": {}}
+
+
+def load_dashboard_snapshots_store():
+    raw = load_json(DASHBOARD_SNAPSHOTS_FILE, None)
+    if not isinstance(raw, dict):
+        return default_dashboard_snapshots_store()
+    snapshots = raw.get("snapshots")
+    if not isinstance(snapshots, dict):
+        snapshots = {}
+    return {"version": 1, "snapshots": snapshots}
+
+
+def save_dashboard_snapshots_store(store):
+    save_json(DASHBOARD_SNAPSHOTS_FILE, store)
+
+
+def save_dashboard_snapshot(group_name, megamu_path=None):
+    """Lưu nguyên vẹn config Dashboard và PlayerPrefs MEGAMU cho một nhóm TK."""
+    group_name = (group_name or "").strip()
+    if not group_name:
+        raise ValueError("Chưa chọn nhóm tài khoản.")
+
+    config_path = get_megamu_config_ini(megamu_path)
+    if not os.path.isfile(config_path):
+        raise FileNotFoundError(f"Không tìm thấy config Dashboard: {config_path}")
+    try:
+        with open(config_path, "rb") as f:
+            config_bytes = f.read()
+    except OSError as e:
+        raise RuntimeError(f"Không đọc được config Dashboard: {e}") from e
+
+    store = load_dashboard_snapshots_store()
+    store["snapshots"][group_name] = {
+        "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        # Lưu bytes để không làm thay đổi bất kỳ trường nào trong config.ini.
+        "config_ini_b64": base64.b64encode(config_bytes).decode("ascii"),
+        # Dashboard/MEGAMU còn dùng PlayerPrefs cho list tài khoản và lựa chọn gần nhất.
+        "account_list": _reg_read_binary_json(REG_ACCOUNT_LIST),
+        "settings": _reg_read_binary_json(REG_SETTINGS),
+    }
+    save_dashboard_snapshots_store(store)
+    return store["snapshots"][group_name]
+
+
+def restore_dashboard_snapshot(group_name, megamu_path=None):
+    """Khôi phục một bản chụp Dashboard. App phải được đóng trước khi gọi."""
+    group_name = (group_name or "").strip()
+    store = load_dashboard_snapshots_store()
+    snapshot = store.get("snapshots", {}).get(group_name)
+    if not isinstance(snapshot, dict):
+        raise KeyError(f"Chưa có Dashboard đã lưu cho nhóm '{group_name}'.")
+
+    encoded_config = snapshot.get("config_ini_b64")
+    if not isinstance(encoded_config, str):
+        raise ValueError("Bản lưu Dashboard bị thiếu config.ini.")
+    try:
+        config_bytes = base64.b64decode(encoded_config.encode("ascii"), validate=True)
+    except Exception as e:
+        raise ValueError("Bản lưu Dashboard có config.ini không hợp lệ.") from e
+
+    config_path = get_megamu_config_ini(megamu_path)
+    config_dir = os.path.dirname(config_path)
+    if not os.path.isdir(config_dir):
+        raise FileNotFoundError(f"Không tìm thấy thư mục MEGAMU: {config_dir}")
+
+    # Ghi tạm rồi thay thế để config không bị dở dang nếu lỗi giữa chừng.
+    temp_path = config_path + ".muclick.restore.tmp"
+    try:
+        with open(temp_path, "wb") as f:
+            f.write(config_bytes)
+        os.replace(temp_path, config_path)
+    except OSError as e:
+        try:
+            if os.path.isfile(temp_path):
+                os.remove(temp_path)
+        except OSError:
+            pass
+        raise RuntimeError(f"Không khôi phục được config Dashboard: {e}") from e
+
+    account_list = snapshot.get("account_list")
+    if isinstance(account_list, dict):
+        _reg_write_binary_json(REG_ACCOUNT_LIST, account_list)
+    settings = snapshot.get("settings")
+    if isinstance(settings, dict):
+        _reg_write_binary_json(REG_SETTINGS, settings)
+
+    return {
+        "saved_at": snapshot.get("saved_at", ""),
+        "config_path": config_path,
+        "restored_account_list": isinstance(account_list, dict),
+        "restored_settings": isinstance(settings, dict),
+    }
+
+
 def _process_running(image_name):
     """True nếu có process image_name đang chạy (tasklist)."""
     try:
@@ -1703,7 +2420,8 @@ def load_autoclick_store():
         "<layout>|<màn hình>": {"points": [{"x": int, "y": int}, ...]}
       },
       "delay_between": float,
-      "run_seconds": float
+      "run_seconds": float,
+      "click_mode": "hardware" | "restore" | "window" | "touch" | "fast" | "turbo"
     }
     """
     data = load_json(AUTOCLICK_FILE, None)
@@ -1716,9 +2434,29 @@ def load_autoclick_store():
             if not isinstance(pt, dict):
                 continue
             try:
-                points.append({"x": int(pt["x"]), "y": int(pt["y"])})
+                item = {"x": int(pt["x"]), "y": int(pt["y"])}
             except Exception:
                 continue
+            try:
+                if pt.get("rx") is not None and pt.get("ry") is not None:
+                    item["rx"] = float(pt["rx"])
+                    item["ry"] = float(pt["ry"])
+            except Exception:
+                pass
+            for key in ("cx", "cy", "cw", "ch"):
+                try:
+                    if pt.get(key) is not None:
+                        item[key] = int(pt[key])
+                except Exception:
+                    pass
+            try:
+                if pt.get("slot") is not None:
+                    item["slot"] = int(pt["slot"])
+            except Exception:
+                pass
+            if isinstance(pt.get("monitor"), str) and pt.get("monitor"):
+                item["monitor"] = pt["monitor"]
+            points.append(item)
         return points
 
     profiles = {}
@@ -1739,12 +2477,30 @@ def load_autoclick_store():
         run_seconds = float(data.get("run_seconds", 30.0))
     except Exception:
         run_seconds = 30.0
+    mode = normalize_click_mode(data.get("click_mode", CLICK_MODE_RESTORE))
     return {
         "version": 2,
         "profiles": profiles,
         "delay_between": max(0.05, delay_between),
         "run_seconds": max(1.0, run_seconds),
+        "click_mode": mode,
     }
+
+
+def _serialize_ac_point(p):
+    item = {"x": int(p["x"]), "y": int(p["y"])}
+    if p.get("rx") is not None and p.get("ry") is not None:
+        item["rx"] = float(p["rx"])
+        item["ry"] = float(p["ry"])
+    for key in ("cx", "cy", "cw", "ch", "slot"):
+        if p.get(key) is not None:
+            try:
+                item[key] = int(p[key])
+            except Exception:
+                pass
+    if isinstance(p.get("monitor"), str) and p.get("monitor"):
+        item["monitor"] = p["monitor"]
+    return item
 
 
 def save_autoclick_store(store):
@@ -1754,7 +2510,7 @@ def save_autoclick_store(store):
             continue
         profiles[key] = {
             "points": [
-                {"x": int(p["x"]), "y": int(p["y"])}
+                _serialize_ac_point(p)
                 for p in (profile.get("points") or [])
                 if isinstance(p, dict) and "x" in p and "y" in p
             ]
@@ -1764,6 +2520,7 @@ def save_autoclick_store(store):
         "profiles": profiles,
         "delay_between": float(store.get("delay_between", 0.5)),
         "run_seconds": float(store.get("run_seconds", 30.0)),
+        "click_mode": normalize_click_mode(store.get("click_mode", CLICK_MODE_RESTORE)),
     }
     save_json(AUTOCLICK_FILE, payload)
 
@@ -1781,12 +2538,21 @@ def layout_ready_count(layout):
 # ---------------------------------------------------------------------------
 def rel_to_screen(hwnd, rx, ry):
     cw, ch = get_client_size(hwnd)
-    cx = int(rx * cw)
-    cy = int(ry * ch)
+    cx = int(round(float(rx) * cw))
+    cy = int(round(float(ry) * ch))
     return client_to_screen(hwnd, cx, cy)
 
 
-def login_one(hwnd, username, password, coords, delays, input_mode="type", click_login=True):
+def login_one(
+    hwnd,
+    username,
+    password,
+    coords,
+    delays,
+    input_mode="type",
+    click_login=True,
+    click_mode=CLICK_MODE_RESTORE,
+):
     """
     Luồng đã kiểm chứng với MEGAMU:
       1) Click ô Account → gõ user thẳng (KHÔNG Ctrl+A — dễ mất focus)
@@ -1796,6 +2562,12 @@ def login_one(hwnd, username, password, coords, delays, input_mode="type", click
     for key in POINT_KEYS:
         if not coords.get(key):
             raise ValueError(f"Chưa ghi tọa độ: {key}")
+
+    click_mode = normalize_click_mode(click_mode)
+    # Message không di chuyển chuột — Unity login dùng tọa độ con trỏ thật,
+    # nên sẽ lệch điểm đã ghi. Login luôn click thật rồi trả chuột.
+    if click_mode in (CLICK_MODE_WINDOW, CLICK_MODE_TOUCH, CLICK_MODE_FAST, CLICK_MODE_TURBO):
+        click_mode = CLICK_MODE_RESTORE
 
     focus_window(hwnd)
     time.sleep(delays["focus"])
@@ -1820,9 +2592,12 @@ def login_one(hwnd, username, password, coords, delays, input_mode="type", click
             type_text_scancode(text, delays["per_char"])
         release_modifiers()
 
+    def click_at(x, y, settle):
+        mouse_click_screen(x, y, settle=settle, hwnd=hwnd, mode=click_mode)
+
     # --- Account: chỉ click + gõ ---
     ax, ay = rel_to_screen(hwnd, coords["account"]["rx"], coords["account"]["ry"])
-    mouse_click_screen(ax, ay, settle=max(0.15, delays.get("after_click", 0.25)), hwnd=hwnd)
+    click_at(ax, ay, max(0.15, delays.get("after_click", 0.25)))
     time.sleep(max(0.2, delays["after_click"]))
     type_into(username)
     time.sleep(delays["after_type"])
@@ -1832,7 +2607,7 @@ def login_one(hwnd, username, password, coords, delays, input_mode="type", click
         focus_window(hwnd)
         time.sleep(0.1)
         # nếu vừa mất focus, click lại account rồi Tab
-        mouse_click_screen(ax, ay, settle=0.15, hwnd=hwnd)
+        click_at(ax, ay, 0.15)
         time.sleep(0.15)
         # gõ lại user nếu focus bị mất giữa chừng là rủi ro — bỏ qua, chỉ Tab
     release_modifiers()
@@ -1849,7 +2624,7 @@ def login_one(hwnd, username, password, coords, delays, input_mode="type", click
         time.sleep(0.1)
 
     lx, ly = rel_to_screen(hwnd, coords["login"]["rx"], coords["login"]["ry"])
-    mouse_click_screen(lx, ly, settle=max(0.15, delays.get("after_click", 0.25)), hwnd=hwnd)
+    click_at(lx, ly, max(0.15, delays.get("after_click", 0.25)))
     time.sleep(delays["after_login"])
 
 
@@ -1888,6 +2663,10 @@ class MegamuLauncherApp(tk.Tk):
         self.auto_account_group_var = tk.StringVar(
             value=self.account_store.get("active_group", "Chơi game")
         )
+        self.dashboard_group_var = tk.StringVar(
+            value=self.account_store.get("active_group", "Chơi game")
+        )
+        self.dashboard_snapshots_store = load_dashboard_snapshots_store()
         self.accounts = self.get_current_accounts()
         self.coords_store = load_coords_store()
         self.autoclick_store = load_autoclick_store()
@@ -1965,6 +2744,12 @@ class MegamuLauncherApp(tk.Tk):
             self.acc_group_combo.configure(values=groups)
         if hasattr(self, "auto_group_combo"):
             self.auto_group_combo.configure(values=groups)
+        if hasattr(self, "dashboard_group_combo"):
+            snapshot_groups = list(self.dashboard_snapshots_store.get("snapshots", {}).keys())
+            dashboard_groups = list(dict.fromkeys(groups + snapshot_groups))
+            self.dashboard_group_combo.configure(values=dashboard_groups)
+            if self.dashboard_group_var.get() not in dashboard_groups:
+                self.dashboard_group_var.set(self.get_current_group())
         if hasattr(self, "acc_group_count_lbl"):
             cur_accs = self.get_current_accounts()
             self.acc_group_count_lbl.configure(
@@ -1980,6 +2765,7 @@ class MegamuLauncherApp(tk.Tk):
             self.auto_group_info_lbl.configure(
                 text=f"({len(g_accs)} tài khoản)"
             )
+        self._refresh_dashboard_snapshot_status()
 
     def _on_acc_group_selected(self, _event=None):
         g = self.account_group_var.get()
@@ -1987,6 +2773,8 @@ class MegamuLauncherApp(tk.Tk):
             return
         self.account_store["active_group"] = g
         save_account_store(self.account_store)
+        if hasattr(self, "dashboard_group_var"):
+            self.dashboard_group_var.set(g)
         self.accounts = self.get_current_accounts()
         self._refresh_group_combos()
         self._refresh_acc_tree()
@@ -2001,6 +2789,114 @@ class MegamuLauncherApp(tk.Tk):
             self._refresh_slot_ui()
         g_accs = self.account_store.get("groups", {}).get(g, [])
         self.status.set(f"Auto Login sẽ dùng danh sách: [{g}] ({len(g_accs)} TK)")
+
+    def _refresh_dashboard_snapshot_status(self):
+        if not hasattr(self, "dashboard_snapshot_status"):
+            return
+        group_name = self.dashboard_group_var.get().strip()
+        snapshot = self.dashboard_snapshots_store.get("snapshots", {}).get(group_name)
+        if isinstance(snapshot, dict):
+            saved_at = snapshot.get("saved_at") or "không rõ thời điểm"
+            self.dashboard_snapshot_status.set(
+                f"Đã lưu Dashboard của [{group_name}] lúc {saved_at}."
+            )
+        else:
+            self.dashboard_snapshot_status.set(
+                f"Chưa có Dashboard đã lưu cho nhóm [{group_name}]."
+            )
+
+    def _on_dashboard_group_selected(self, _event=None):
+        self._refresh_dashboard_snapshot_status()
+
+    def on_save_dashboard_snapshot(self):
+        if self._busy:
+            return
+        group_name = self.dashboard_group_var.get().strip()
+        if not group_name:
+            messagebox.showwarning("Chưa chọn nhóm", "Hãy chọn nhóm tài khoản cần lưu Dashboard.")
+            return
+        if not messagebox.askyesno(
+            "Lưu Dashboard",
+            f"Lưu toàn bộ trạng thái Dashboard hiện tại cho nhóm [{group_name}]?\n\n"
+            "Bản lưu gồm config.ini và danh sách/lựa chọn account của MEGAMU. "
+            "Nếu nhóm này đã có bản lưu, bản cũ sẽ được thay thế.",
+            parent=self,
+        ):
+            return
+        try:
+            snapshot = save_dashboard_snapshot(group_name, self.path_var.get().strip())
+        except Exception as e:
+            messagebox.showerror("Không lưu được Dashboard", str(e), parent=self)
+            return
+        self.dashboard_snapshots_store = load_dashboard_snapshots_store()
+        self._refresh_group_combos()
+        self.status.set(
+            f"Đã lưu Dashboard cho nhóm [{group_name}] lúc {snapshot.get('saved_at', '')}."
+        )
+
+    def on_restore_dashboard_snapshot(self):
+        if self._busy:
+            return
+        group_name = self.dashboard_group_var.get().strip()
+        snapshot = self.dashboard_snapshots_store.get("snapshots", {}).get(group_name)
+        if not isinstance(snapshot, dict):
+            messagebox.showwarning(
+                "Chưa có bản lưu",
+                f"Nhóm [{group_name}] chưa có Dashboard đã lưu.",
+                parent=self,
+            )
+            return
+        running = list_running_megamu_processes()
+        msg = (
+            f"Khôi phục Dashboard đã lưu của nhóm [{group_name}] "
+            f"(lưu lúc {snapshot.get('saved_at') or 'không rõ'})?\n\n"
+            "MEGAMU và Dashboard đang chạy sẽ được đóng để tránh chúng ghi đè dữ liệu, "
+            "sau đó Dashboard sẽ được mở lại với trạng thái đã lưu."
+        )
+        if running:
+            msg += f"\n\nĐang chạy: {', '.join(running)}"
+        if not messagebox.askyesno("Mở lại Dashboard đã lưu", msg, parent=self):
+            return
+
+        path = self.path_var.get().strip()
+        self.set_busy(True, f"Đang mở lại Dashboard của nhóm [{group_name}]...")
+
+        def worker():
+            try:
+                close_info = close_megamu_and_dashboard()
+                if close_info.get("still_running"):
+                    raise RuntimeError(
+                        "Không đóng được: " + ", ".join(close_info["still_running"])
+                    )
+                restore_info = restore_dashboard_snapshot(group_name, path)
+                opened = open_dashboard(path)
+
+                def done():
+                    self.refresh_saved_accounts()
+                    self.set_busy(
+                        False,
+                        f"Đã khôi phục Dashboard [{group_name}]"
+                        + (" và mở lại Dashboard." if opened else "."),
+                    )
+                    if not opened:
+                        messagebox.showwarning(
+                            "Đã khôi phục dữ liệu",
+                            "Dữ liệu đã được khôi phục nhưng không tìm thấy Dashboard.exe để mở.\n"
+                            f"Config: {restore_info['config_path']}",
+                            parent=self,
+                        )
+
+                self.after(0, done)
+            except Exception as e:
+                self.after(
+                    0,
+                    lambda: (
+                        self.set_busy(False, "Không mở lại được Dashboard đã lưu."),
+                        messagebox.showerror("Không khôi phục được Dashboard", str(e), parent=self),
+                    ),
+                )
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def on_add_account_group(self):
         name = simpledialog.askstring(
@@ -2042,10 +2938,16 @@ class MegamuLauncherApp(tk.Tk):
             messagebox.showwarning("Trùng tên", f"Tên '{new_name}' đã tồn tại.", parent=self)
             return
         groups[new_name] = groups.pop(old_name, [])
+        snapshots = self.dashboard_snapshots_store.setdefault("snapshots", {})
+        if old_name in snapshots and new_name not in snapshots:
+            snapshots[new_name] = snapshots.pop(old_name)
+            save_dashboard_snapshots_store(self.dashboard_snapshots_store)
         self.account_store["active_group"] = new_name
         self.account_group_var.set(new_name)
         if hasattr(self, "auto_account_group_var") and self.auto_account_group_var.get() == old_name:
             self.auto_account_group_var.set(new_name)
+        if hasattr(self, "dashboard_group_var") and self.dashboard_group_var.get() == old_name:
+            self.dashboard_group_var.set(new_name)
         save_account_store(self.account_store)
         self.accounts = self.get_current_accounts()
         self._refresh_group_combos()
@@ -2406,6 +3308,46 @@ class MegamuLauncherApp(tk.Tk):
             command=self.on_clear_saved_accounts,
         ).grid(row=4, column=0, sticky="w", pady=(8, 0))
 
+        dashboard_profiles = ttk.LabelFrame(
+            saved, text=" Dashboard đã lưu theo nhóm tài khoản ", padding=6
+        )
+        dashboard_profiles.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(10, 0))
+        ttk.Label(dashboard_profiles, text="Nhóm:").grid(row=0, column=0, sticky="w")
+        self.dashboard_group_combo = ttk.Combobox(
+            dashboard_profiles,
+            textvariable=self.dashboard_group_var,
+            values=self.get_group_list(),
+            state="readonly",
+            width=16,
+        )
+        self.dashboard_group_combo.grid(row=0, column=1, sticky="w", padx=(6, 10))
+        self.dashboard_group_combo.bind(
+            "<<ComboboxSelected>>", self._on_dashboard_group_selected
+        )
+        ttk.Button(
+            dashboard_profiles,
+            text="Lưu Dashboard hiện tại",
+            width=20,
+            command=self.on_save_dashboard_snapshot,
+        ).grid(row=0, column=2, sticky="w", padx=(0, 6))
+        ttk.Button(
+            dashboard_profiles,
+            text="Mở lại Dashboard đã lưu",
+            width=22,
+            command=self.on_restore_dashboard_snapshot,
+        ).grid(row=0, column=3, sticky="w")
+        self.dashboard_snapshot_status = tk.StringVar(value="")
+        ttk.Label(
+            dashboard_profiles,
+            textvariable=self.dashboard_snapshot_status,
+            foreground="#055",
+        ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(5, 0))
+        ttk.Label(
+            dashboard_profiles,
+            text="Lưu config.ini cùng danh sách account và lựa chọn gần nhất của MEGAMU.",
+            foreground="#555",
+        ).grid(row=2, column=0, columnspan=4, sticky="w", pady=(3, 0))
+
         btns = ttk.Frame(frm)
         btns.grid(row=6, column=0, columnspan=4, sticky="w", pady=(10, 0))
         self.btn_launch = ttk.Button(btns, text="Mở & Sắp xếp", command=self.on_launch, width=16)
@@ -2445,6 +3387,7 @@ class MegamuLauncherApp(tk.Tk):
         ).grid(row=8, column=0, sticky="w", pady=(8, 0))
 
         self.refresh_saved_accounts()
+        self._refresh_group_combos()
 
     # ----- Accounts tab -----
     def _build_accounts_tab(self):
@@ -3003,7 +3946,7 @@ class MegamuLauncherApp(tk.Tk):
             ),
             foreground="#555",
             justify="left",
-        ).grid(row=5, column=0, columnspan=4, sticky="w", pady=(8, 0))
+        ).grid(row=6, column=0, columnspan=4, sticky="w", pady=(8, 0))
 
         self._refresh_slot_ui()
 
@@ -3340,6 +4283,9 @@ class MegamuLauncherApp(tk.Tk):
         for attr in (
             "btn_ac_pick",
             "btn_ac_clear",
+            "btn_ac_test",
+            "btn_ac_diagnose",
+            "btn_ac_touch_test",
             "btn_ac_start",
             "btn_ac_refresh",
             "btn_cmd_run",
@@ -3660,6 +4606,11 @@ class MegamuLauncherApp(tk.Tk):
             return "type"
         return mode
 
+    def _click_mode(self):
+        """Giữ một cách click duy nhất: chuột thật, tuần tự."""
+        self.autoclick_store["click_mode"] = CLICK_MODE_HARDWARE
+        return CLICK_MODE_HARDWARE
+
     def _account_at(self, index):
         """Account theo thứ tự danh sách của loại tài khoản được chọn; thiếu hoặc user trống = ô để trống."""
         auto_g = (
@@ -3767,12 +4718,17 @@ class MegamuLauncherApp(tk.Tk):
 
         hwnd = hwnds[idx]
         self._stop_login = False
+        try:
+            self._persist_ac_timing()
+        except Exception:
+            pass
         self.set_busy(True, f"Thử login ô {idx + 1} ({acc['username']}) - [{auto_g}]...")
         self.btn_stop.configure(state="normal")
         self.iconify()
 
         def worker():
             try:
+                click_mode = self._click_mode()
                 login_one(
                     hwnd,
                     acc["username"],
@@ -3780,8 +4736,12 @@ class MegamuLauncherApp(tk.Tk):
                     slot,
                     self._login_delays(),
                     input_mode=self._input_mode(),
+                    click_mode=click_mode,
                 )
-                msg = f"Đã thử ô {idx + 1}: {acc['username']} - [{auto_g}] (mode={self._input_mode()})"
+                msg = (
+                    f"Đã thử ô {idx + 1}: {acc['username']} - [{auto_g}] "
+                    f"(nhập={self._input_mode()}, click={click_mode})"
+                )
             except Exception as e:
                 msg = f"Lỗi: {e}"
             self.after(0, lambda: self._finish_login(msg))
@@ -3829,9 +4789,11 @@ class MegamuLauncherApp(tk.Tk):
             if unused_accounts
             else ""
         )
+        click_mode = self._click_mode()
         if not messagebox.askyesno(
             "Xác nhận Auto Login",
             f"Layout {layout.get('name')}  |  Loại TK: [{auto_g}]\n"
+            f"Cách click: {CLICK_MODE_LABELS.get(click_mode, click_mode)}\n"
             f"Sẽ login {len(plan)} ô: "
             + ", ".join(f"#{p['index'] + 1}={p['acc']['username']}" for p in plan)
             + skip_txt
@@ -3849,6 +4811,10 @@ class MegamuLauncherApp(tk.Tk):
         self.iconify()
 
         mode = self._input_mode()
+        try:
+            self._persist_ac_timing()
+        except Exception:
+            pass
 
         def worker():
             ok = 0
@@ -3881,6 +4847,7 @@ class MegamuLauncherApp(tk.Tk):
                         slot,
                         delays,
                         input_mode=mode,
+                        click_mode=click_mode,
                     )
                     ok += 1
                     if step < total - 1 and between > 0:
@@ -3889,7 +4856,7 @@ class MegamuLauncherApp(tk.Tk):
                 err = str(e)
             msg = (
                 f"Auto login xong: {ok}/{total} "
-                f"(layout {layout.get('name')}, mode={mode}, bỏ trống {len(skipped_empty)} ô)."
+                f"(layout {layout.get('name')}, nhập={mode}, click={click_mode}, bỏ trống {len(skipped_empty)} ô)."
             )
             if skipped:
                 msg += f" Bỏ qua {skipped} cửa sổ đã đóng."
@@ -3972,8 +4939,9 @@ class MegamuLauncherApp(tk.Tk):
         ttk.Label(
             frm,
             text=(
-                "Điểm click được lưu riêng theo layout và các màn hình đã chọn. "
-                "Mỗi lần click chuột trái = 1 điểm, đến đủ số cửa sổ trong hồ sơ hiện tại thì dừng chọn."
+                "Mỗi cửa sổ / mỗi màn hình có điểm click RIÊNG trong danh sách. "
+                "Khi chạy, cửa sổ 1 bấm điểm 1, cửa sổ 2 bấm điểm 2 — không dùng một điểm chung. "
+                "Click chuột trái trên từng cửa sổ để ghi điểm, đến đủ số cửa sổ thì dừng chọn."
             ),
             wraplength=620,
             justify="left",
@@ -4005,7 +4973,7 @@ class MegamuLauncherApp(tk.Tk):
         self.ac_run_var = tk.DoubleVar(
             value=float(self.autoclick_store.get("run_seconds", 30.0))
         )
-        ttk.Label(timing, text="Delay giữa mỗi điểm (giây)").grid(
+        ttk.Label(timing, text="Delay giữa mỗi click (giây)").grid(
             row=0, column=0, sticky="w"
         )
         ttk.Spinbox(
@@ -4044,6 +5012,10 @@ class MegamuLauncherApp(tk.Tk):
             btns, text="Xóa điểm", width=12, command=self.on_ac_clear_points
         )
         self.btn_ac_clear.pack(side="left", padx=(0, 6))
+        self.btn_ac_test = ttk.Button(
+            btns, text="Thử 1 click", width=12, command=self.on_ac_test_click
+        )
+        self.btn_ac_test.pack(side="left", padx=(0, 6))
         self.btn_ac_start = ttk.Button(
             btns, text="Bắt đầu Auto Click", width=18, command=self.on_ac_start
         )
@@ -4092,17 +5064,20 @@ class MegamuLauncherApp(tk.Tk):
             self.ac_list.insert(tk.END, "(chưa có điểm)")
             return
         for i, pt in enumerate(points):
-            self.ac_list.insert(tk.END, f"Điểm {i + 1}:  x={pt['x']}  y={pt['y']}")
+            self.ac_list.insert(tk.END, self._ac_point_label(i, pt))
 
     def _persist_ac_timing(self):
-        try:
-            self.autoclick_store["delay_between"] = float(self.ac_delay_var.get())
-        except Exception:
-            self.autoclick_store["delay_between"] = 0.5
-        try:
-            self.autoclick_store["run_seconds"] = float(self.ac_run_var.get())
-        except Exception:
-            self.autoclick_store["run_seconds"] = 30.0
+        if hasattr(self, "ac_delay_var"):
+            try:
+                self.autoclick_store["delay_between"] = float(self.ac_delay_var.get())
+            except Exception:
+                self.autoclick_store["delay_between"] = 0.5
+        if hasattr(self, "ac_run_var"):
+            try:
+                self.autoclick_store["run_seconds"] = float(self.ac_run_var.get())
+            except Exception:
+                self.autoclick_store["run_seconds"] = 30.0
+        self.autoclick_store["click_mode"] = CLICK_MODE_HARDWARE
         save_autoclick_store(self.autoclick_store)
 
     def on_ac_clear_points(self):
@@ -4135,11 +5110,12 @@ class MegamuLauncherApp(tk.Tk):
             return
         if not messagebox.askyesno(
             "Chọn điểm Auto Click",
-            f"Sẽ ghi {needed} điểm (theo số cửa sổ đang mở).\n\n"
+            f"Sẽ ghi {needed} điểm — mỗi cửa sổ một điểm riêng.\n\n"
             "Cách chọn:\n"
-            "1) Đưa chuột tới vị trí cần click trên từng cửa sổ\n"
-            "2) Click chuột trái = ghi 1 điểm\n"
-            "3) Lặp đến đủ số điểm\n\n"
+            "1) Click đúng vị trí cần bấm trên cửa sổ 1\n"
+            "2) Click đúng vị trí trên cửa sổ 2 (có thể khác cửa sổ 1)\n"
+            "3) Lặp đến đủ số cửa sổ\n\n"
+            "Chạy sau đó: mỗi cửa sổ chỉ nhận đúng điểm đã gắn với nó.\n"
             "Esc để hủy. Danh sách điểm cũ sẽ bị thay thế.",
         ):
             return
@@ -4196,16 +5172,23 @@ class MegamuLauncherApp(tk.Tk):
             user32.GetCursorPos(ctypes.byref(pt))
             x, y = int(pt.x), int(pt.y)
             points = self._ac_points()
-            points.append({"x": x, "y": y})
+            points.append(capture_screen_point(x, y, self._ac_game_hwnds()))
             save_autoclick_store(self.autoclick_store)
             self._refresh_ac_profile()
 
             got = len(points)
             needed = self._ac_pick_needed
-            self.status.set(f"Đã ghi điểm {got}/{needed}: ({x}, {y})")
+            last = points[-1]
+            bound = self._ac_point_label(got - 1, last)
+            used_slots = [p.get("slot") for p in points if p.get("slot") is not None]
+            dup = (
+                last.get("slot") is not None and used_slots.count(last.get("slot")) > 1
+            )
+            warn = " — trùng cửa sổ, hãy chọn cửa sổ khác!" if dup else ""
+            self.status.set(f"Đã ghi {got}/{needed}: {bound}{warn}")
             self.ac_status_var.set(
-                f"Đã ghi điểm {got}/{needed}: ({x}, {y}). "
-                + (f"Click tiếp cho điểm {got + 1}." if got < needed else "Xong.")
+                f"Đã ghi {got}/{needed}: {bound}{warn}. "
+                + (f"Click tiếp trên cửa sổ khác." if got < needed else "Xong.")
             )
 
             if got >= needed:
@@ -4226,6 +5209,210 @@ class MegamuLauncherApp(tk.Tk):
 
         self._ac_pick_job = self.after(30, self._poll_ac_pick)
 
+    def _ac_point_label(self, i, pt):
+        slot = pt.get("slot")
+        mon = pt.get("monitor") or ""
+        if mon.startswith("\\\\.\\"):
+            mon = mon.split("\\")[-1]
+        parts = [f"Điểm {i + 1}"]
+        if slot is not None:
+            parts.append(f"cửa sổ {int(slot) + 1}")
+        if mon:
+            parts.append(mon)
+        if pt.get("cx") is not None and pt.get("cy") is not None:
+            parts.append(f"client {int(pt['cx'])},{int(pt['cy'])}")
+        elif pt.get("rx") is not None and pt.get("ry") is not None:
+            parts.append(f"({pt['rx']:.3f},{pt['ry']:.3f})")
+        else:
+            parts.append(f"x={pt['x']} y={pt['y']}")
+        return " | ".join(parts)
+
+    def _ac_resolved_targets(self, points=None):
+        """Mỗi điểm → (hwnd, sx, sy, cx, cy) của đúng cửa sổ đã setup."""
+        hwnds = self._ac_game_hwnds()
+        points = points if points is not None else list(self._ac_points())
+        targets = []
+        for i, pt in enumerate(points):
+            (x, y), hwnd, cx, cy = resolve_screen_point(
+                pt, hwnds=hwnds, fallback_index=i
+            )
+            if hwnd:
+                targets.append((hwnd, x, y, cx, cy))
+        return targets
+
+    def _ac_click_point(self, pt, index=None):
+        """Một click chuột thật tại một điểm setup duy nhất."""
+        hwnds = self._ac_game_hwnds()
+        (x, y), hwnd, cx, cy = resolve_screen_point(
+            pt, hwnds=hwnds, fallback_index=index
+        )
+        # Không dùng foreground/focus cưỡng bức, không trả chuột, không queue:
+        # tuần tự đúng một điểm theo chu kỳ Delay của người dùng.
+        mouse_click_screen(x, y, settle=0.05, hwnd=None, mode=CLICK_MODE_HARDWARE)
+        return x, y, hwnd
+
+    def _ac_apply_zen(self, p_idx, warned_slots):
+        warn_msg = None
+        active_accs = self.get_current_accounts()
+        if p_idx < 0 or p_idx >= len(active_accs):
+            return warn_msg
+        acc = active_accs[p_idx]
+        cur_zen = parse_zen(acc.get("zen", 0))
+        new_zen = max(0, cur_zen - ZEN_PER_CLICK)
+        acc["zen"] = new_zen
+        if new_zen < ZEN_WARN_THRESHOLD:
+            slot_num = p_idx + 1
+            u_name = acc.get("username", f"Slot {slot_num}")
+            warn_msg = (
+                f"⚠️ CẢNH BÁO: Slot {slot_num} ({u_name}) còn "
+                f"{format_zen(new_zen)} Zen (< 200M)!"
+            )
+            if slot_num not in warned_slots:
+                warned_slots.add(slot_num)
+                try:
+                    user32.MessageBeep(0x00000030)
+                except Exception:
+                    pass
+        return warn_msg
+
+    def on_ac_diagnose_common_point(self):
+        """Tạo ảnh đối chiếu điểm UI chung, tuyệt đối không click game."""
+        if self._busy or self._ac_picking or self._ac_running:
+            return
+        points = list(self._ac_points())
+        if not points:
+            messagebox.showwarning(
+                "Chưa có điểm",
+                "Hãy setup các điểm trước khi kiểm tra điểm chung.",
+            )
+            return
+        hwnds = self._ac_game_hwnds()
+        if not hwnds:
+            messagebox.showwarning("Không có game", "Không tìm thấy cửa sổ game đã chọn.")
+            return
+
+        self.status.set("Đang chụp và đối chiếu điểm chung...")
+        self.ac_status_var.set("Đang tạo ảnh chẩn đoán — không gửi click.")
+
+        def worker():
+            result = None
+            err = None
+            try:
+                result = create_common_point_diagnostic(points, hwnds)
+            except Exception as exc:
+                err = str(exc)
+
+            def done():
+                if err:
+                    self.status.set(f"Kiểm tra điểm chung lỗi: {err}")
+                    self.ac_status_var.set(f"Kiểm tra điểm chung lỗi: {err}")
+                    return
+                self.status.set("Đã tạo ảnh kiểm tra điểm chung.")
+                self.ac_status_var.set(
+                    f"Điểm chung ({result['rx']:.4f}, {result['ry']:.4f}) — "
+                    f"đã lưu ảnh: {result['file']}"
+                )
+
+            self.after(0, done)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def on_ac_test_parallel_touch(self):
+        """Thử một lần touch injection đa điểm tại button chung đã xác minh."""
+        if self._busy or self._ac_picking or self._ac_running:
+            return
+        points = list(self._ac_points())
+        hwnds = self._ac_game_hwnds()
+        if not points or not hwnds:
+            messagebox.showwarning(
+                "Chưa sẵn sàng",
+                "Cần có điểm setup và cửa sổ game đang chọn để thử chạm đồng thời.",
+            )
+            return
+        if not messagebox.askyesno(
+            "Thử chạm đồng thời",
+            f"Sẽ chạm đồng thời {len(hwnds)} button theo điểm chung đã setup.\n"
+            "Không di chuyển chuột. Đây là một lần thử và sẽ kích hoạt hành động game.\n\n"
+            "Tiếp tục?",
+        ):
+            return
+
+        self.status.set("Đang gửi chạm đa điểm đồng thời...")
+        self.ac_status_var.set("Đang thử touch injection — không dùng chuột hệ thống.")
+
+        def worker():
+            result = None
+            err = None
+            try:
+                # Chẩn đoán chỉ tạo ảnh đối chiếu.  Điểm được gửi vẫn là từng
+                # điểm đã setup riêng, không lấy trung vị/chung cho mọi game.
+                diagnostic = create_common_point_diagnostic(points, hwnds)
+                targets = self._ac_resolved_targets(points)
+                if len(targets) != len(points):
+                    raise ValueError("Không quy đổi được đủ điểm setup về các cửa sổ game")
+                inject_touch_clicks_parallel(
+                    [(target[1], target[2]) for target in targets]
+                )
+                result = {"targets": targets, "diagnostic": diagnostic}
+            except Exception as exc:
+                err = str(exc)
+
+            def done():
+                if err:
+                    self.status.set(f"Chạm đồng thời lỗi: {err}")
+                    self.ac_status_var.set(f"Chạm đồng thời lỗi: {err}")
+                    return
+                self.status.set("Đã gửi một frame chạm đa điểm đồng thời.")
+                self.ac_status_var.set(
+                    f"Đã chạm đồng thời {len(result['targets'])} điểm. "
+                    "Mỗi điểm là tọa độ setup riêng của đúng cửa sổ game."
+                )
+
+            self.after(0, done)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def on_ac_test_click(self):
+        if self._busy or self._ac_picking or self._ac_running:
+            return
+        self._persist_ac_timing()
+        points = list(self._ac_points())
+        if not points:
+            messagebox.showwarning(
+                "Chưa có điểm",
+                "Hãy chọn điểm Auto Click trước, rồi bấm Thử 1 click.",
+            )
+            return
+        idx = 0
+        if hasattr(self, "ac_list"):
+            sel = self.ac_list.curselection()
+            if sel:
+                idx = int(sel[0])
+                if idx < 0 or idx >= len(points):
+                    idx = 0
+        pt = points[idx]
+        self.ac_status_var.set(f"Thử {self._ac_point_label(idx, pt)} bằng chuột hệ thống")
+        self.status.set("Đang thử click...")
+
+        def worker():
+            err = None
+            try:
+                self._ac_click_point(pt, index=idx)
+            except Exception as e:
+                err = str(e)
+
+            def done():
+                if err:
+                    self.ac_status_var.set(f"Thử click lỗi: {err}")
+                    self.status.set("Thử click thất bại.")
+                    return
+                self.ac_status_var.set(f"Đã click điểm {idx + 1} bằng chuột hệ thống.")
+                self.status.set("Xong thử click.")
+
+            self.after(0, done)
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def on_ac_start(self):
         if self._busy or self._ac_picking or self._ac_running:
             return
@@ -4242,8 +5429,9 @@ class MegamuLauncherApp(tk.Tk):
         if not messagebox.askyesno(
             "Bắt đầu Auto Click",
             f"{self._ac_profile_description()}\n"
-            f"Sẽ click lần lượt {len(points)} điểm,\n"
-            f"cách nhau {delay:.2f}s, chạy trong {run_seconds:.0f}s rồi tự dừng.\n"
+            f"Sẽ click lần lượt {len(points)} điểm theo đúng thứ tự setup,\n"
+            f"cách nhau {delay:.2f}s.\n"
+            f"Chạy trong {run_seconds:.0f}s rồi tự dừng.\n"
             f"Mỗi click trừ 10.000.000 Zen của tài khoản tương ứng.\n"
             "Có thể bấm Dừng hoặc nhấn phím ESC bất cứ lúc nào.\n\nTiếp tục?",
         ):
@@ -4281,35 +5469,18 @@ class MegamuLauncherApp(tk.Tk):
                     elapsed = time.time() - start
                     if elapsed >= run_seconds:
                         break
+                    warn_msg = None
                     p_idx = idx % len(points)
                     pt = points[p_idx]
-                    mouse_click_screen(pt["x"], pt["y"], settle=0.05, hwnd=None)
+                    self._ac_click_point(pt, index=p_idx)
                     clicks += 1
                     idx += 1
-
-                    # Trừ 10.000.000 Zen cho tài khoản tương ứng
-                    warn_msg = None
-                    active_accs = self.get_current_accounts()
-                    if p_idx < len(active_accs):
-                        acc = active_accs[p_idx]
-                        cur_zen = parse_zen(acc.get("zen", 0))
-                        new_zen = max(0, cur_zen - ZEN_PER_CLICK)
-                        acc["zen"] = new_zen
-
-                        if new_zen < ZEN_WARN_THRESHOLD:
-                            slot_num = p_idx + 1
-                            u_name = acc.get("username", f"Slot {slot_num}")
-                            warn_msg = f"⚠️ CẢNH BÁO: Slot {slot_num} ({u_name}) còn {format_zen(new_zen)} Zen (< 200M)!"
-                            if slot_num not in warned_slots:
-                                warned_slots.add(slot_num)
-                                try:
-                                    user32.MessageBeep(0x00000030)
-                                except Exception:
-                                    pass
+                    warn_msg = self._ac_apply_zen(p_idx, warned_slots)
+                    tick_i = p_idx + 1
 
                     self.after(
                         0,
-                        lambda e=elapsed, c=clicks, i=p_idx + 1, wm=warn_msg: self._on_ac_tick(
+                        lambda e=elapsed, c=clicks, i=tick_i, wm=warn_msg: self._on_ac_tick(
                             e, run_seconds, c, i, len(points), wm
                         ),
                     )
