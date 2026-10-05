@@ -69,6 +69,15 @@
           "app_version": "1.0.8"
         }
       ]
+    },
+    {
+      "id": "K006",
+      "key": "MUCLK-T2G-lr4Y0T5TicRcQcdp613kPkJVvsde",
+      "exp": "2029-07-01",
+      "note": "",
+      "max_devices": 1,
+      "enabled": true,
+      "hwids": []
     }
   ]
 }
