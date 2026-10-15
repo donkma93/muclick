@@ -93,6 +93,15 @@
       "max_devices": 1,
       "enabled": true,
       "hwids": []
+    },
+    {
+      "id": "K008",
+      "key": "MUCLK--iyqjc0cF0Bh_YdctTowO1KVqR7G46Aq",
+      "exp": "2026-11-14",
+      "note": "",
+      "max_devices": 1,
+      "enabled": true,
+      "hwids": []
     }
   ]
 }
