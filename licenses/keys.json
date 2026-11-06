@@ -123,6 +123,15 @@
           "app_version": "1.0.8"
         }
       ]
+    },
+    {
+      "id": "K010",
+      "key": "MUCLK-1c5nQ1PfnAkNChthA-Zj65coHznYNz_2",
+      "exp": "2027-05-05",
+      "note": "",
+      "max_devices": 1,
+      "enabled": true,
+      "hwids": []
     }
   ]
 }
