@@ -146,7 +146,13 @@
       "note": "",
       "max_devices": 1,
       "enabled": true,
-      "hwids": []
+      "hwids": [
+        {
+          "hwid": "b1f02d4adb935713cdc1785a9b12244a13646241ef2d06f3fb237574008812b4",
+          "bound_at": "2026-11-13T09:41:12",
+          "app_version": "1.0.8"
+        }
+      ]
     }
   ]
 }
